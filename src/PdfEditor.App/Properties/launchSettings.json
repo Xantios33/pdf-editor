@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "PdfEditor.App (Unpackaged)": {
+      "commandName": "Project",
+      "nativeDebugging": false
+    }
+  }
+}

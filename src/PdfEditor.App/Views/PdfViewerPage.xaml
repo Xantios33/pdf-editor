@@ -1,0 +1,149 @@
+<UserControl
+    x:Class="PdfEditor.App.Views.PdfViewerPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" IsOpen="False">
+            <AppBarButton x:Name="OpenButton" Icon="OpenFile" Label="Ouvrir"
+                          Click="OnOpenClick" />
+            <AppBarButton x:Name="SaveButton" Icon="Save" Label="Sauvegarder"
+                          Click="OnSaveClick" IsEnabled="False" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="UndoButton" Icon="Undo" Label="Annuler"
+                          Click="OnUndoClick" IsEnabled="False">
+                <AppBarButton.KeyboardAccelerators>
+                    <KeyboardAccelerator Key="Z" Modifiers="Control" />
+                </AppBarButton.KeyboardAccelerators>
+            </AppBarButton>
+            <AppBarButton x:Name="RedoButton" Icon="Redo" Label="Rétablir"
+                          Click="OnRedoClick" IsEnabled="False">
+                <AppBarButton.KeyboardAccelerators>
+                    <KeyboardAccelerator Key="Y" Modifiers="Control" />
+                </AppBarButton.KeyboardAccelerators>
+            </AppBarButton>
+            <AppBarSeparator />
+            <AppBarButton x:Name="EditModeButton" Icon="Edit" Label="Éditer"
+                          Click="OnEditModeClick" IsEnabled="False" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="ZoomOutButton" Icon="ZoomOut" Label="Zoom -"
+                          Click="OnZoomOutClick" />
+            <AppBarButton x:Name="ZoomInButton" Icon="ZoomIn" Label="Zoom +"
+                          Click="OnZoomInClick" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="PrevButton" Icon="Previous" Label="Précédent"
+                          Click="OnPrevPageClick" IsEnabled="False" />
+            <AppBarButton x:Name="NextButton" Icon="Next" Label="Suivant"
+                          Click="OnNextPageClick" IsEnabled="False" />
+        </CommandBar>
+
+        <!-- Format Toolbar (visible when editing a text block) -->
+        <StackPanel x:Name="FormatToolbar" Grid.Row="1" Orientation="Horizontal"
+                    Visibility="Collapsed" Padding="8,4" Spacing="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <ComboBox x:Name="FontFamilyCombo" Width="130"
+                      SelectionChanged="OnFontFamilyChanged">
+                <ComboBoxItem Content="Helvetica" IsSelected="True" />
+                <ComboBoxItem Content="Times" />
+                <ComboBoxItem Content="Courier" />
+            </ComboBox>
+            <NumberBox x:Name="FontSizeBox" Width="90" Minimum="6" Maximum="72"
+                       SpinButtonPlacementMode="Compact"
+                       ValueChanged="OnFontSizeChanged" />
+            <AppBarSeparator />
+            <ToggleButton x:Name="BoldToggle" Width="36" Height="36"
+                          Click="OnBoldToggleClick">
+                <TextBlock Text="B" FontWeight="Bold" />
+            </ToggleButton>
+            <ToggleButton x:Name="ItalicToggle" Width="36" Height="36"
+                          Click="OnItalicToggleClick">
+                <TextBlock Text="I" FontStyle="Italic" />
+            </ToggleButton>
+            <ToggleButton x:Name="UnderlineToggle" Width="36" Height="36"
+                          Click="OnUnderlineToggleClick">
+                <TextBlock Text="U" TextDecorations="Underline" />
+            </ToggleButton>
+            <AppBarSeparator />
+            <DropDownButton x:Name="ColorButton" Content="A" Width="44" Height="36">
+                <DropDownButton.Flyout>
+                    <Flyout x:Name="ColorFlyout">
+                        <GridView x:Name="ColorGrid" SelectionMode="Single"
+                                  SelectionChanged="OnColorSelected">
+                            <GridView.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <ItemsWrapGrid MaximumRowsOrColumns="5" Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </GridView.ItemsPanel>
+                        </GridView>
+                    </Flyout>
+                </DropDownButton.Flyout>
+            </DropDownButton>
+        </StackPanel>
+
+        <!-- PDF Page Display -->
+        <ScrollViewer x:Name="PageScrollViewer" Grid.Row="2"
+                      ZoomMode="Disabled"
+                      HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch"
+                      Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <Canvas x:Name="PageCanvas"
+                    HorizontalAlignment="Center"
+                    Margin="0,20,0,20">
+                <!-- Rendered PDF page -->
+                <Image x:Name="PageImage"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Top" />
+
+                <!-- Loading indicator -->
+                <ProgressRing x:Name="LoadingRing"
+                              IsActive="False"
+                              Width="48" Height="48" />
+
+                <!-- Text block overlays are added dynamically in code-behind -->
+            </Canvas>
+        </ScrollViewer>
+
+        <!-- Empty state overlay -->
+        <TextBlock x:Name="EmptyStateText" Grid.Row="2"
+                   Text="Ouvrir un fichier PDF pour commencer"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   FontSize="16" />
+
+        <!-- Status Bar -->
+        <Grid Grid.Row="3" Padding="12,6"
+              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock x:Name="StatusTextBlock"
+                       Text="Prêt"
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       FontSize="12" />
+
+            <TextBlock x:Name="PageIndicatorText"
+                       Grid.Column="1"
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       FontSize="12" />
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="itext" Version="9.*" />
+    <PackageReference Include="itext.bouncy-castle-adapter" Version="9.*" />
+    <PackageReference Include="itext.pdfsweep" Version="5.*" NoWarn="NU1701" />
+    <PackageReference Include="PDFtoImage" Version="5.*" />
+    <PackageReference Include="SkiaSharp" Version="3.*" />
+  </ItemGroup>
+
+</Project>
