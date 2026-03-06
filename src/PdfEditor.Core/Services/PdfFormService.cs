@@ -1,8 +1,11 @@
 using iText.Forms;
 using iText.Forms.Fields;
+using iText.Kernel.Font;
+using iText.Kernel.Geom;
 using iText.Kernel.Pdf;
 using iText.Kernel.Pdf.Annot;
 using PdfEditor.Core.Models;
+using StandardFonts = iText.IO.Font.Constants.StandardFonts;
 
 namespace PdfEditor.Core.Services;
 
@@ -72,8 +75,16 @@ public class PdfFormService : IPdfFormService
                     if (opts != null)
                     {
                         options = new List<string>();
-                        foreach (var opt in opts)
-                            options.Add(opt.ToString() ?? "");
+                        for (int i = 0; i < opts.Size(); i++)
+                        {
+                            var opt = opts.Get(i);
+                            if (opt is PdfString pdfStr)
+                                options.Add(pdfStr.ToUnicodeString());
+                            else if (opt is PdfArray optArr && optArr.Size() > 1)
+                                options.Add(((PdfString)optArr.Get(1)).ToUnicodeString());
+                            else
+                                options.Add(opt.ToString() ?? "");
+                        }
                     }
                 }
             }
@@ -85,10 +96,30 @@ public class PdfFormService : IPdfFormService
                     continue; // Skip unnamed widgets (decorative)
 
                 fieldType = MapFieldTypeFromDict(widgetDict);
-                currentValue = fieldType == FormFieldType.Checkbox
+                currentValue = (fieldType == FormFieldType.Checkbox || fieldType == FormFieldType.RadioButton)
                     ? ReadCheckboxState(widgetDict)
                     : ReadFieldValue(widgetDict);
                 isReadOnly = ReadIsReadOnly(widgetDict);
+
+                // Read dropdown options from orphan widget /Opt array
+                if (fieldType == FormFieldType.Dropdown)
+                {
+                    var optArray = widgetDict.GetAsArray(PdfName.Opt);
+                    if (optArray != null)
+                    {
+                        options = new List<string>();
+                        for (int i = 0; i < optArray.Size(); i++)
+                        {
+                            var opt = optArray.Get(i);
+                            if (opt is PdfString pdfStr)
+                                options.Add(pdfStr.ToUnicodeString());
+                            else if (opt is PdfArray optArr && optArr.Size() > 1)
+                                options.Add(((PdfString)optArr.Get(1)).ToUnicodeString());
+                            else
+                                options.Add(opt.ToString() ?? "");
+                        }
+                    }
+                }
             }
 
             var llx = rect.GetAsNumber(0)?.FloatValue() ?? 0;
@@ -116,6 +147,20 @@ public class PdfFormService : IPdfFormService
             });
         }
 
+        return result;
+    }
+
+    public List<FormField> ExtractAllFormFields(string filePath)
+    {
+        // Get page count first
+        int pageCount;
+        using (var r = new PdfReader(filePath))
+        using (var doc = new PdfDocument(r))
+            pageCount = doc.GetNumberOfPages();
+
+        var result = new List<FormField>();
+        for (int i = 0; i < pageCount; i++)
+            result.AddRange(ExtractFormFields(filePath, i));
         return result;
     }
 
@@ -177,6 +222,248 @@ public class PdfFormService : IPdfFormService
         }
 
         pdfDoc.Close();
+    }
+
+    public void CreateFormField(string filePath, CreateFormFieldParams p)
+    {
+        var fileBytes = File.ReadAllBytes(filePath);
+        using var inputStream = new MemoryStream(fileBytes);
+        using var reader = new PdfReader(inputStream);
+        using var writer = new PdfWriter(filePath);
+        using var pdfDoc = new PdfDocument(reader, writer);
+
+        var pageNumber = p.PageIndex + 1;
+        var page = pdfDoc.GetPage(pageNumber);
+        var form = PdfFormCreator.GetAcroForm(pdfDoc, true);
+        var rect = new Rectangle(p.X, p.Y, p.Width, p.Height);
+        var font = PdfFontFactory.CreateFont(StandardFonts.HELVETICA);
+
+        switch (p.FieldTool)
+        {
+            case InsertionTool.FormTextField:
+                var textField = new TextFormFieldBuilder(pdfDoc, p.FieldName)
+                    .SetPage(pageNumber)
+                    .SetWidgetRectangle(rect)
+                    .SetFont(font)
+                    .CreateText();
+                if (!string.IsNullOrEmpty(p.DefaultValue))
+                    textField.SetValue(p.DefaultValue);
+                form.AddField(textField, page);
+                break;
+
+            case InsertionTool.FormCheckbox:
+                var checkboxField = new CheckBoxFormFieldBuilder(pdfDoc, p.FieldName)
+                    .SetPage(pageNumber)
+                    .SetWidgetRectangle(rect)
+                    .CreateCheckBox();
+                form.AddField(checkboxField, page);
+                break;
+
+            case InsertionTool.FormRadioButton:
+                var groupName = p.RadioGroupName ?? p.FieldName;
+                // Check if radio group already exists
+                var allFields = form.GetAllFormFields();
+                PdfButtonFormField? radioGroup = null;
+                if (allFields.TryGetValue(groupName, out var existing) && existing is PdfButtonFormField btn && btn.IsRadio())
+                {
+                    radioGroup = btn;
+                }
+                if (radioGroup == null)
+                {
+                    radioGroup = new RadioFormFieldBuilder(pdfDoc, groupName)
+                        .CreateRadioGroup();
+                }
+                var radioAnnot = new RadioFormFieldBuilder(pdfDoc, groupName)
+                    .CreateRadioButton(p.DefaultValue ?? "Option1", rect);
+                radioGroup.AddKid(radioAnnot);
+                if (!allFields.ContainsKey(groupName))
+                    form.AddField(radioGroup, page);
+                break;
+
+            case InsertionTool.FormDropdown:
+                var options = p.Options?.ToArray() ?? new[] { "Option 1", "Option 2", "Option 3" };
+                var choiceField = new ChoiceFormFieldBuilder(pdfDoc, p.FieldName)
+                    .SetPage(pageNumber)
+                    .SetWidgetRectangle(rect)
+                    .SetOptions(options)
+                    .SetFont(font)
+                    .CreateComboBox();
+                if (!string.IsNullOrEmpty(p.DefaultValue))
+                    choiceField.SetValue(p.DefaultValue);
+                form.AddField(choiceField, page);
+                break;
+
+            case InsertionTool.FormImage:
+                // Push button with image icon
+                var imageBtn = new PushButtonFormFieldBuilder(pdfDoc, p.FieldName)
+                    .SetPage(pageNumber)
+                    .SetWidgetRectangle(rect)
+                    .SetCaption("")
+                    .CreatePushButton();
+                if (!string.IsNullOrEmpty(p.ImageFilePath))
+                    imageBtn.SetImage(p.ImageFilePath);
+                form.AddField(imageBtn, page);
+                break;
+
+            case InsertionTool.FormDate:
+                // Text field with date format
+                var dateField = new TextFormFieldBuilder(pdfDoc, p.FieldName)
+                    .SetPage(pageNumber)
+                    .SetWidgetRectangle(rect)
+                    .SetFont(font)
+                    .CreateText();
+                if (!string.IsNullOrEmpty(p.DefaultValue))
+                    dateField.SetValue(p.DefaultValue);
+                // Set JavaScript format action for date display (dd/MM/yyyy)
+                var jsFormat = new PdfString("AFDate_FormatEx(\"dd/mm/yyyy\");");
+                var jsKeystroke = new PdfString("AFDate_KeystrokeEx(\"dd/mm/yyyy\");");
+                var formatAction = new PdfDictionary();
+                formatAction.Put(PdfName.S, PdfName.JavaScript);
+                formatAction.Put(new PdfName("JS"), jsFormat);
+                var keystrokeAction = new PdfDictionary();
+                keystrokeAction.Put(PdfName.S, PdfName.JavaScript);
+                keystrokeAction.Put(new PdfName("JS"), jsKeystroke);
+                var aa = new PdfDictionary();
+                aa.Put(new PdfName("F"), formatAction);
+                aa.Put(new PdfName("K"), keystrokeAction);
+                dateField.GetPdfObject().Put(new PdfName("AA"), aa);
+                form.AddField(dateField, page);
+                break;
+        }
+
+        pdfDoc.Close();
+    }
+
+    public void UpdateFormFieldProperties(string filePath, FormFieldProperties props)
+    {
+        var fileBytes = File.ReadAllBytes(filePath);
+        using var inputStream = new MemoryStream(fileBytes);
+        using var reader = new PdfReader(inputStream);
+        using var writer = new PdfWriter(filePath);
+        using var pdfDoc = new PdfDocument(reader, writer);
+
+        var form = PdfFormCreator.GetAcroForm(pdfDoc, false);
+
+        // Try AcroForm high-level field first
+        if (form != null)
+        {
+            var fields = form.GetAllFormFields();
+            if (fields.TryGetValue(props.OriginalFieldName, out var field))
+            {
+                // Rename
+                if (!string.IsNullOrEmpty(props.NewFieldName) && props.NewFieldName != props.OriginalFieldName)
+                    field.SetFieldName(props.NewFieldName);
+
+                // Font size — set via default appearance string
+                if (props.FontSize.HasValue)
+                {
+                    var da = $"/Helv {props.FontSize.Value:F1} Tf 0 g";
+                    field.GetPdfObject().Put(PdfName.DA, new PdfString(da));
+                }
+
+                // Options for choice fields
+                if (props.Options != null && field is PdfChoiceFormField choiceField)
+                {
+                    var optArray = new iText.Kernel.Pdf.PdfArray();
+                    foreach (var opt in props.Options)
+                        optArray.Add(new PdfString(opt));
+                    choiceField.GetPdfObject().Put(PdfName.Opt, optArray);
+                }
+
+                // Resize + reposition widget
+                UpdateWidgetRect(field, props);
+
+                field.GetPdfObject().SetModified();
+                field.RegenerateField();
+                pdfDoc.Close();
+                return;
+            }
+        }
+
+        // Fallback: orphan widget
+        for (int p = 1; p <= pdfDoc.GetNumberOfPages(); p++)
+        {
+            var page = pdfDoc.GetPage(p);
+            foreach (var annot in page.GetAnnotations())
+            {
+                if (annot is not PdfWidgetAnnotation widget) continue;
+                var dict = widget.GetPdfObject();
+                var name = ReadFieldName(dict);
+                if (name != props.OriginalFieldName) continue;
+
+                // Rename
+                if (!string.IsNullOrEmpty(props.NewFieldName) && props.NewFieldName != props.OriginalFieldName)
+                    dict.Put(PdfName.T, new PdfString(props.NewFieldName));
+
+                // Font size
+                if (props.FontSize.HasValue)
+                {
+                    var da = $"/Helv {props.FontSize.Value:F1} Tf 0 g";
+                    dict.Put(PdfName.DA, new PdfString(da));
+                }
+
+                // Options
+                if (props.Options != null)
+                {
+                    var optArray = new iText.Kernel.Pdf.PdfArray();
+                    foreach (var opt in props.Options)
+                        optArray.Add(new PdfString(opt));
+                    dict.Put(PdfName.Opt, optArray);
+                }
+
+                // Rect
+                if (props.X.HasValue || props.Y.HasValue || props.Width.HasValue || props.Height.HasValue)
+                {
+                    var oldRect = dict.GetAsArray(PdfName.Rect);
+                    var llx = oldRect?.GetAsNumber(0)?.FloatValue() ?? 0;
+                    var lly = oldRect?.GetAsNumber(1)?.FloatValue() ?? 0;
+                    var urx = oldRect?.GetAsNumber(2)?.FloatValue() ?? 0;
+                    var ury = oldRect?.GetAsNumber(3)?.FloatValue() ?? 0;
+
+                    var x = props.X ?? Math.Min(llx, urx);
+                    var y = props.Y ?? Math.Min(lly, ury);
+                    var w = props.Width ?? Math.Abs(urx - llx);
+                    var h = props.Height ?? Math.Abs(ury - lly);
+
+                    var newRect = new iText.Kernel.Pdf.PdfArray(new float[] { x, y, x + w, y + h });
+                    dict.Put(PdfName.Rect, newRect);
+                }
+
+                // Remove cached appearance to regenerate
+                dict.Remove(PdfName.AP);
+                dict.SetModified();
+                pdfDoc.Close();
+                return;
+            }
+        }
+
+        pdfDoc.Close();
+    }
+
+    private static void UpdateWidgetRect(PdfFormField field, FormFieldProperties props)
+    {
+        if (!props.X.HasValue && !props.Y.HasValue && !props.Width.HasValue && !props.Height.HasValue)
+            return;
+
+        var widgets = field.GetWidgets();
+        if (widgets == null || widgets.Count == 0) return;
+
+        var widget = widgets[0];
+        var oldRect = widget.GetRectangle();
+        if (oldRect == null) return;
+
+        var llx = oldRect.GetAsNumber(0)?.FloatValue() ?? 0;
+        var lly = oldRect.GetAsNumber(1)?.FloatValue() ?? 0;
+        var urx = oldRect.GetAsNumber(2)?.FloatValue() ?? 0;
+        var ury = oldRect.GetAsNumber(3)?.FloatValue() ?? 0;
+
+        var x = props.X ?? Math.Min(llx, urx);
+        var y = props.Y ?? Math.Min(lly, ury);
+        var w = props.Width ?? Math.Abs(urx - llx);
+        var h = props.Height ?? Math.Abs(ury - lly);
+
+        var newRect = new Rectangle(x, y, w, h);
+        widget.SetRectangle(new iText.Kernel.Pdf.PdfArray(new float[] { x, y, x + w, y + h }));
     }
 
     private static string ReadFieldName(PdfDictionary dict)

@@ -15,3 +15,16 @@ public class FormField
     public int PageIndex { get; set; }
     public bool IsReadOnly { get; set; }
 }
+
+public class FormFieldProperties
+{
+    public required string OriginalFieldName { get; set; }
+    public int PageIndex { get; set; }
+    public string? NewFieldName { get; set; }
+    public float? X { get; set; }
+    public float? Y { get; set; }
+    public float? Width { get; set; }
+    public float? Height { get; set; }
+    public float? FontSize { get; set; }
+    public List<string>? Options { get; set; }
+}

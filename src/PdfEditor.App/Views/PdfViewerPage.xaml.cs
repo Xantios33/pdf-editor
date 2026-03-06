@@ -46,6 +46,13 @@ public sealed partial class PdfViewerPage : UserControl
     // Form field overlays
     private readonly List<FrameworkElement> _formFieldOverlays = new();
 
+    // Insertion mode state
+    private InsertionTool _activeInsertionTool = InsertionTool.None;
+    private bool _isInsertionPanelOpen;
+    private bool _isInsertionDragging;
+    private Point _insertionDragStart;
+    private Microsoft.UI.Xaml.Shapes.Rectangle? _insertionPreview;
+
     // Format toolbar state — suppress change events during sync
     private bool _syncingToolbar;
 
@@ -76,6 +83,17 @@ public sealed partial class PdfViewerPage : UserControl
             handledEventsToo: true);
 
         InitializeColorGrid();
+
+        this.KeyDown += OnPageKeyDown;
+    }
+
+    private void OnPageKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape && _activeInsertionTool != InsertionTool.None)
+        {
+            CancelInsertionMode();
+            e.Handled = true;
+        }
     }
 
     private void InitializeColorGrid()
@@ -158,6 +176,7 @@ public sealed partial class PdfViewerPage : UserControl
             case nameof(MainViewModel.HasDocument):
                 SaveButton.IsEnabled = _viewModel.HasDocument;
                 EditModeButton.IsEnabled = _viewModel.HasDocument;
+                InsertButton.IsEnabled = _viewModel.HasDocument;
                 UpdateNavigationButtons();
                 break;
 
@@ -170,6 +189,10 @@ public sealed partial class PdfViewerPage : UserControl
                 break;
 
             case nameof(MainViewModel.CurrentPageIndex):
+                RemoveFieldHighlight();
+                UpdateNavigationButtons();
+                break;
+
             case nameof(MainViewModel.PageCount):
                 UpdateNavigationButtons();
                 break;
@@ -239,6 +262,15 @@ public sealed partial class PdfViewerPage : UserControl
 
         if (_isEditMode)
         {
+            // Close insertion panel if open
+            if (_isInsertionPanelOpen)
+            {
+                _isInsertionPanelOpen = false;
+                InsertionPanel.Width = 0;
+                InsertButton.Label = "Insérer";
+                CancelInsertionMode();
+            }
+
             EditModeButton.Label = "Éditer (ON)";
             ClearFormFieldOverlays();
             await ShowTextBlockOverlaysAsync();
@@ -780,7 +812,6 @@ public sealed partial class PdfViewerPage : UserControl
     private FrameworkElement CreateFormFieldBorder(FormField field, double sw, double sh)
     {
         var isReadOnly = field.IsReadOnly ||
-            field.FieldType == FormFieldType.RadioButton ||
             field.FieldType == FormFieldType.Signature ||
             field.FieldType == FormFieldType.Unknown;
 
@@ -809,6 +840,11 @@ public sealed partial class PdfViewerPage : UserControl
             border.PointerEntered += (s, e) => { if (s is Border b) b.BorderThickness = new Thickness(2); };
             border.PointerExited += (s, e) => { if (s is Border b) b.BorderThickness = new Thickness(1); };
         }
+        else
+        {
+            // Read-only fields: still allow right-click for properties
+            border.PointerPressed += OnFormBorderRightClickOnly;
+        }
 
         return border;
     }
@@ -817,6 +853,15 @@ public sealed partial class PdfViewerPage : UserControl
     {
         if (sender is not Border border || border.Tag is not FormField field)
             return;
+
+        // Right-click → open properties dialog
+        var point = e.GetCurrentPoint(border);
+        if (point.Properties.IsRightButtonPressed)
+        {
+            e.Handled = true;
+            _ = ShowFormFieldPropertiesDialog(field);
+            return;
+        }
 
         e.Handled = true;
         CloseActiveFormEditor();
@@ -857,6 +902,7 @@ public sealed partial class PdfViewerPage : UserControl
                 return;
 
             case FormFieldType.Checkbox:
+            case FormFieldType.RadioButton:
                 // Toggle immediately, no editor needed
                 var newVal = (field.CurrentValue == "Yes" || field.CurrentValue == "On") ? "Off" : "Yes";
                 border.Visibility = Visibility.Visible;
@@ -867,20 +913,31 @@ public sealed partial class PdfViewerPage : UserControl
             case FormFieldType.Dropdown:
                 var comboBox = new ComboBox
                 {
-                    Width = Math.Max(sw + 16, 80),
+                    Width = Math.Max(sw + 40, 120),
                     Height = Math.Max(sh + 10, 32),
                     FontSize = Math.Max(9, sh * 0.6),
                     BorderThickness = new Thickness(1.5),
                     BorderBrush = new SolidColorBrush(Colors.Green),
-                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(220, 255, 255, 255)),
+                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(240, 255, 255, 255)),
                     Tag = field,
+                    PlaceholderText = field.CurrentValue ?? "Sélectionner...",
                 };
-                if (field.Options != null)
+                if (field.Options != null && field.Options.Count > 0)
                 {
                     foreach (var option in field.Options)
-                        comboBox.Items.Add(option);
+                        comboBox.Items.Add(new ComboBoxItem { Content = option, Tag = option });
+                    // Match current value
                     if (field.CurrentValue != null)
-                        comboBox.SelectedItem = field.CurrentValue;
+                    {
+                        for (int i = 0; i < field.Options.Count; i++)
+                        {
+                            if (field.Options[i] == field.CurrentValue)
+                            {
+                                comboBox.SelectedIndex = i;
+                                break;
+                            }
+                        }
+                    }
                 }
                 comboBox.SelectionChanged += OnFormDropdownChanged;
                 comboBox.LostFocus += OnFormEditorLostFocus;
@@ -889,7 +946,12 @@ public sealed partial class PdfViewerPage : UserControl
                 Canvas.SetTop(editor, sy - (Math.Max(sh + 10, 32) - sh) / 2);
                 PageCanvas.Children.Add(editor);
                 _activeFormEditor = editor;
-                comboBox.IsDropDownOpen = true;
+                // Defer IsDropDownOpen until control is loaded
+                comboBox.Loaded += (s, _) =>
+                {
+                    if (s is ComboBox cb)
+                        cb.IsDropDownOpen = true;
+                };
                 return;
 
             default:
@@ -932,7 +994,10 @@ public sealed partial class PdfViewerPage : UserControl
         foreach (var overlay in _formFieldOverlays)
         {
             if (overlay is Border border)
+            {
                 border.PointerPressed -= OnFormBorderPressed;
+                border.PointerPressed -= OnFormBorderRightClickOnly;
+            }
 
             PageCanvas.Children.Remove(overlay);
         }
@@ -991,10 +1056,16 @@ public sealed partial class PdfViewerPage : UserControl
 
     private async void OnFormDropdownChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is ComboBox combo && combo.Tag is FormField field && combo.SelectedItem is string selected)
+        if (sender is not ComboBox combo || combo.Tag is not FormField field)
+            return;
+        string? selected = combo.SelectedItem switch
         {
+            ComboBoxItem item => item.Tag as string ?? item.Content as string,
+            string s => s,
+            _ => null,
+        };
+        if (selected != null)
             await ApplyFormFieldValueAsync(field, selected);
-        }
     }
 
     private async Task ApplyFormFieldValueAsync(FormField field, string value)
@@ -1004,6 +1075,712 @@ public sealed partial class PdfViewerPage : UserControl
         await _viewModel.SetFormFieldValueAsync(field.FieldName, value);
         if (!_isEditMode)
             await ShowFormFieldOverlaysAsync();
+    }
+
+    private void OnFormBorderRightClickOnly(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border border || border.Tag is not FormField field)
+            return;
+
+        var point = e.GetCurrentPoint(border);
+        if (point.Properties.IsRightButtonPressed)
+        {
+            e.Handled = true;
+            _ = ShowFormFieldPropertiesDialog(field);
+        }
+    }
+
+    private async Task ShowFormFieldPropertiesDialog(FormField field)
+    {
+        // Build dialog content
+        var panel = new StackPanel { Spacing = 12, MinWidth = 350 };
+
+        var nameBox = new TextBox
+        {
+            Header = "Nom du champ",
+            Text = field.FieldName,
+        };
+        panel.Children.Add(nameBox);
+
+        // Position & Size
+        var posPanel = new StackPanel { Spacing = 8 };
+        posPanel.Children.Add(new Microsoft.UI.Xaml.Controls.TextBlock
+        {
+            Text = "Position et taille",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        });
+
+        var posGrid = new Grid();
+        posGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        posGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8, GridUnitType.Pixel) });
+        posGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        posGrid.RowDefinitions.Add(new RowDefinition());
+        posGrid.RowDefinitions.Add(new RowDefinition());
+
+        var xBox = new NumberBox { Header = "X", Value = Math.Round(field.X, 1), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact, SmallChange = 1 };
+        var yBox = new NumberBox { Header = "Y", Value = Math.Round(field.Y, 1), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact, SmallChange = 1 };
+        var wBox = new NumberBox { Header = "Largeur", Value = Math.Round(field.Width, 1), Minimum = 5, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact, SmallChange = 1 };
+        var hBox = new NumberBox { Header = "Hauteur", Value = Math.Round(field.Height, 1), Minimum = 5, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact, SmallChange = 1 };
+
+        Grid.SetColumn(xBox, 0); Grid.SetRow(xBox, 0);
+        Grid.SetColumn(yBox, 2); Grid.SetRow(yBox, 0);
+        Grid.SetColumn(wBox, 0); Grid.SetRow(wBox, 1);
+        Grid.SetColumn(hBox, 2); Grid.SetRow(hBox, 1);
+        posGrid.Children.Add(xBox);
+        posGrid.Children.Add(yBox);
+        posGrid.Children.Add(wBox);
+        posGrid.Children.Add(hBox);
+        posPanel.Children.Add(posGrid);
+        panel.Children.Add(posPanel);
+
+        // Font size (for text and dropdown)
+        NumberBox? fontSizeBox = null;
+        if (field.FieldType == FormFieldType.Text || field.FieldType == FormFieldType.Dropdown)
+        {
+            fontSizeBox = new NumberBox
+            {
+                Header = "Taille de police",
+                Value = 0,
+                PlaceholderText = "Auto",
+                Minimum = 0,
+                Maximum = 72,
+                SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact,
+                SmallChange = 1,
+            };
+            panel.Children.Add(fontSizeBox);
+        }
+
+        // Options (for dropdown)
+        TextBox? optionsBox = null;
+        if (field.FieldType == FormFieldType.Dropdown)
+        {
+            optionsBox = new TextBox
+            {
+                Header = "Options (séparées par virgule)",
+                Text = field.Options != null ? string.Join(", ", field.Options) : "",
+                AcceptsReturn = false,
+            };
+            panel.Children.Add(optionsBox);
+        }
+
+        // Info
+        panel.Children.Add(new Microsoft.UI.Xaml.Controls.TextBlock
+        {
+            Text = $"Type : {field.FieldType}",
+            Foreground = new SolidColorBrush(Colors.Gray),
+            FontSize = 12,
+        });
+
+        var dialog = new ContentDialog
+        {
+            Title = "Propriétés du champ",
+            Content = panel,
+            PrimaryButtonText = "Appliquer",
+            CloseButtonText = "Annuler",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = this.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+            return;
+
+        // Build properties update
+        var props = new FormFieldProperties
+        {
+            OriginalFieldName = field.FieldName,
+            PageIndex = field.PageIndex,
+        };
+
+        if (nameBox.Text != field.FieldName)
+            props.NewFieldName = nameBox.Text;
+
+        if (!double.IsNaN(xBox.Value)) props.X = (float)xBox.Value;
+        if (!double.IsNaN(yBox.Value)) props.Y = (float)yBox.Value;
+        if (!double.IsNaN(wBox.Value)) props.Width = (float)wBox.Value;
+        if (!double.IsNaN(hBox.Value)) props.Height = (float)hBox.Value;
+
+        if (fontSizeBox != null && !double.IsNaN(fontSizeBox.Value) && fontSizeBox.Value > 0)
+            props.FontSize = (float)fontSizeBox.Value;
+
+        if (optionsBox != null && !string.IsNullOrWhiteSpace(optionsBox.Text))
+        {
+            props.Options = optionsBox.Text
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+        }
+
+        _preserveScrollOnRender = true;
+        await _viewModel.UpdateFormFieldPropertiesAsync(props);
+        if (!_isEditMode)
+            await ShowFormFieldOverlaysAsync();
+    }
+
+    // ---- Insertion panel ----
+
+    private void OnInsertPanelToggle(object sender, RoutedEventArgs e)
+    {
+        _isInsertionPanelOpen = !_isInsertionPanelOpen;
+
+        if (_isInsertionPanelOpen)
+        {
+            // Close edit mode if active
+            if (_isEditMode)
+            {
+                _isEditMode = false;
+                EditModeButton.Label = "Éditer";
+                ClearTextBlockOverlays();
+                HideFormatToolbar();
+                _textBlocks = null;
+            }
+
+            InsertionPanel.Width = 260;
+            InsertButton.Label = "Insérer (ON)";
+            EnsurePivotHandler();
+        }
+        else
+        {
+            InsertionPanel.Width = 0;
+            InsertButton.Label = "Insérer";
+            CancelInsertionMode();
+            RemoveFieldHighlight();
+        }
+    }
+
+    private void OnInsertTextClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.Text);
+
+    private void OnInsertImageClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.Image);
+
+    private void OnInsertLineClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.Line);
+
+    private void OnInsertRectClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.Rectangle);
+
+    private void OnInsertCircleClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.Circle);
+
+    private void EnterInsertionMode(InsertionTool tool)
+    {
+        _activeInsertionTool = tool;
+        _viewModel.ActiveTool = tool;
+
+        // Visual feedback: highlight the active button
+        ResetInsertionButtonStyles();
+        var activeBtn = tool switch
+        {
+            InsertionTool.Text => InsertTextBtn,
+            InsertionTool.Image => InsertImageBtn,
+            InsertionTool.Line => InsertLineBtn,
+            InsertionTool.Rectangle => InsertRectBtn,
+            InsertionTool.Circle => InsertCircleBtn,
+            InsertionTool.FormTextField => InsertFormTextBtn,
+            InsertionTool.FormCheckbox => InsertFormCheckboxBtn,
+            InsertionTool.FormRadioButton => InsertFormRadioBtn,
+            InsertionTool.FormDropdown => InsertFormDropdownBtn,
+            InsertionTool.FormImage => InsertFormImageBtn,
+            InsertionTool.FormDate => InsertFormDateBtn,
+            _ => null
+        };
+        if (activeBtn != null)
+        {
+            activeBtn.BorderThickness = new Thickness(2);
+            activeBtn.BorderBrush = new SolidColorBrush(Colors.DodgerBlue);
+        }
+
+        // Show shape options for shape tools
+        ShapeOptionsPanel.Visibility = (tool == InsertionTool.Line || tool == InsertionTool.Rectangle || tool == InsertionTool.Circle)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        // Show form field options
+        var isFormTool = IsFormTool(tool);
+        FormFieldOptionsPanel.Visibility = isFormTool ? Visibility.Visible : Visibility.Collapsed;
+        FormFieldOptionsListPanel.Visibility = tool == InsertionTool.FormDropdown ? Visibility.Visible : Visibility.Collapsed;
+        FormFieldRadioGroupPanel.Visibility = tool == InsertionTool.FormRadioButton ? Visibility.Visible : Visibility.Collapsed;
+
+        if (isFormTool && string.IsNullOrEmpty(FormFieldNameBox.Text))
+            FormFieldNameBox.Text = GenerateFieldName(tool);
+
+        // Set cursor
+        ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.Cross);
+
+        // Attach canvas handlers
+        PageCanvas.PointerPressed -= OnCanvasInsertionPointerPressed;
+        PageCanvas.PointerMoved -= OnCanvasInsertionPointerMoved;
+        PageCanvas.PointerReleased -= OnCanvasInsertionPointerReleased;
+        PageCanvas.PointerPressed += OnCanvasInsertionPointerPressed;
+        PageCanvas.PointerMoved += OnCanvasInsertionPointerMoved;
+        PageCanvas.PointerReleased += OnCanvasInsertionPointerReleased;
+    }
+
+    private void CancelInsertionMode()
+    {
+        _activeInsertionTool = InsertionTool.None;
+        _viewModel.ActiveTool = InsertionTool.None;
+        _isInsertionDragging = false;
+
+        ResetInsertionButtonStyles();
+        ShapeOptionsPanel.Visibility = Visibility.Collapsed;
+        FormFieldOptionsPanel.Visibility = Visibility.Collapsed;
+
+        if (_insertionPreview != null)
+        {
+            PageCanvas.Children.Remove(_insertionPreview);
+            _insertionPreview = null;
+        }
+
+        ProtectedCursor = null;
+
+        PageCanvas.PointerPressed -= OnCanvasInsertionPointerPressed;
+        PageCanvas.PointerMoved -= OnCanvasInsertionPointerMoved;
+        PageCanvas.PointerReleased -= OnCanvasInsertionPointerReleased;
+    }
+
+    private void OnInsertFormTextClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormTextField);
+
+    private void OnInsertFormCheckboxClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormCheckbox);
+
+    private void OnInsertFormRadioClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormRadioButton);
+
+    private void OnInsertFormDropdownClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormDropdown);
+
+    private void OnInsertFormImageClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormImage);
+
+    private void OnInsertFormDateClick(object sender, RoutedEventArgs e)
+        => EnterInsertionMode(InsertionTool.FormDate);
+
+    private void ResetInsertionButtonStyles()
+    {
+        foreach (var btn in new Button[] { InsertTextBtn, InsertImageBtn, InsertLineBtn, InsertRectBtn, InsertCircleBtn,
+                                           InsertFormTextBtn, InsertFormCheckboxBtn, InsertFormRadioBtn, InsertFormDropdownBtn,
+                                           InsertFormImageBtn, InsertFormDateBtn })
+        {
+            btn.BorderThickness = new Thickness(0);
+            btn.BorderBrush = null;
+        }
+    }
+
+    private static int _fieldCounter;
+    private static string GenerateFieldName(InsertionTool tool)
+    {
+        _fieldCounter++;
+        return tool switch
+        {
+            InsertionTool.FormTextField => $"text_{_fieldCounter}",
+            InsertionTool.FormCheckbox => $"checkbox_{_fieldCounter}",
+            InsertionTool.FormRadioButton => $"radio_{_fieldCounter}",
+            InsertionTool.FormDropdown => $"dropdown_{_fieldCounter}",
+            InsertionTool.FormImage => $"image_{_fieldCounter}",
+            InsertionTool.FormDate => $"date_{_fieldCounter}",
+            _ => $"field_{_fieldCounter}"
+        };
+    }
+
+    private static bool IsFormTool(InsertionTool tool) =>
+        tool == InsertionTool.FormTextField || tool == InsertionTool.FormCheckbox
+        || tool == InsertionTool.FormRadioButton || tool == InsertionTool.FormDropdown
+        || tool == InsertionTool.FormImage || tool == InsertionTool.FormDate;
+
+    private (double pdfX, double pdfY) ScreenToPdfPoint(double screenX, double screenY)
+    {
+        var imageW = PageImage.Width;
+        var imageH = PageImage.Height;
+        var pageHeightPdf = _bitmapHeight / (double)RenderDpi * 72.0;
+
+        var pdfX = screenX / imageW * _bitmapWidth / (double)RenderDpi * 72.0;
+        var pdfY = (1.0 - screenY / imageH) * pageHeightPdf;
+
+        return (pdfX, pdfY);
+    }
+
+    private async void OnCanvasInsertionPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_activeInsertionTool == InsertionTool.None) return;
+
+        var pos = e.GetCurrentPoint(PageCanvas).Position;
+
+        if (_activeInsertionTool == InsertionTool.Text)
+        {
+            // Show inline textbox for insertion
+            e.Handled = true;
+            ShowInsertionTextBox(pos);
+            return;
+        }
+
+        if (_activeInsertionTool == InsertionTool.Image)
+        {
+            e.Handled = true;
+            await InsertImageAtAsync(pos);
+            return;
+        }
+
+        // Shape tools & form field tools: start drag
+        _isInsertionDragging = true;
+        _insertionDragStart = pos;
+        PageCanvas.CapturePointer(e.Pointer);
+
+        // Create preview rectangle
+        _insertionPreview = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            Stroke = new SolidColorBrush(Colors.DodgerBlue),
+            StrokeThickness = 1.5,
+            StrokeDashArray = new DoubleCollection { 4, 2 },
+            Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(30, 30, 144, 255)),
+            Width = 0,
+            Height = 0,
+        };
+        Canvas.SetLeft(_insertionPreview, pos.X);
+        Canvas.SetTop(_insertionPreview, pos.Y);
+        PageCanvas.Children.Add(_insertionPreview);
+
+        e.Handled = true;
+    }
+
+    private void OnCanvasInsertionPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isInsertionDragging || _insertionPreview == null) return;
+
+        var pos = e.GetCurrentPoint(PageCanvas).Position;
+        var x = Math.Min(pos.X, _insertionDragStart.X);
+        var y = Math.Min(pos.Y, _insertionDragStart.Y);
+        var w = Math.Abs(pos.X - _insertionDragStart.X);
+        var h = Math.Abs(pos.Y - _insertionDragStart.Y);
+
+        Canvas.SetLeft(_insertionPreview, x);
+        Canvas.SetTop(_insertionPreview, y);
+        _insertionPreview.Width = w;
+        _insertionPreview.Height = h;
+
+        e.Handled = true;
+    }
+
+    private async void OnCanvasInsertionPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isInsertionDragging || _insertionPreview == null) return;
+
+        PageCanvas.ReleasePointerCapture(e.Pointer);
+        _isInsertionDragging = false;
+
+        var pos = e.GetCurrentPoint(PageCanvas).Position;
+        var screenX = Math.Min(pos.X, _insertionDragStart.X);
+        var screenY = Math.Min(pos.Y, _insertionDragStart.Y);
+        var screenW = Math.Abs(pos.X - _insertionDragStart.X);
+        var screenH = Math.Abs(pos.Y - _insertionDragStart.Y);
+
+        // Remove preview
+        PageCanvas.Children.Remove(_insertionPreview);
+        _insertionPreview = null;
+
+        // Minimum size check
+        if (screenW < 5 || screenH < 5)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        // Convert corners to PDF coordinates
+        var (pdfLeft, pdfTop) = ScreenToPdfPoint(screenX, screenY);
+        var (pdfRight, pdfBottom) = ScreenToPdfPoint(screenX + screenW, screenY + screenH);
+
+        var pdfX = Math.Min(pdfLeft, pdfRight);
+        var pdfY = Math.Min(pdfTop, pdfBottom);
+        var pdfW = Math.Abs(pdfRight - pdfLeft);
+        var pdfH = Math.Abs(pdfTop - pdfBottom);
+
+        _preserveScrollOnRender = true;
+
+        if (IsFormTool(_activeInsertionTool))
+        {
+            // Create form field
+            var fieldName = FormFieldNameBox.Text;
+            if (string.IsNullOrWhiteSpace(fieldName))
+                fieldName = GenerateFieldName(_activeInsertionTool);
+
+            var formParams = new CreateFormFieldParams
+            {
+                PageIndex = _viewModel.CurrentPageIndex,
+                FieldTool = _activeInsertionTool,
+                FieldName = fieldName,
+                X = (float)pdfX,
+                Y = (float)pdfY,
+                Width = (float)pdfW,
+                Height = (float)pdfH,
+            };
+
+            if (_activeInsertionTool == InsertionTool.FormDropdown && !string.IsNullOrWhiteSpace(FormFieldOptionsBox.Text))
+            {
+                formParams.Options = FormFieldOptionsBox.Text
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .ToList();
+            }
+
+            if (_activeInsertionTool == InsertionTool.FormRadioButton && !string.IsNullOrWhiteSpace(FormFieldRadioGroupBox.Text))
+            {
+                formParams.RadioGroupName = FormFieldRadioGroupBox.Text;
+            }
+
+            // Image field: open file picker for image
+            if (_activeInsertionTool == InsertionTool.FormImage)
+            {
+                var imagePath = await PickImageFileAsync();
+                if (imagePath == null)
+                {
+                    e.Handled = true;
+                    return; // User cancelled
+                }
+                formParams.ImageFilePath = imagePath;
+            }
+
+            // Date field: open date picker dialog
+            if (_activeInsertionTool == InsertionTool.FormDate)
+            {
+                var dateValue = await ShowDatePickerDialogAsync();
+                if (dateValue != null)
+                    formParams.DefaultValue = dateValue;
+            }
+
+            await _viewModel.CreateFormFieldAsync(formParams);
+
+            // Auto-increment field name for next placement
+            FormFieldNameBox.Text = GenerateFieldName(_activeInsertionTool);
+        }
+        else
+        {
+            // Shape insertion
+            var strokeWidth = (float)(StrokeWidthBox.Value is double v && !double.IsNaN(v) ? v : 1.0);
+
+            var shapeParams = new InsertShapeParams
+            {
+                PageIndex = _viewModel.CurrentPageIndex,
+                ShapeType = _activeInsertionTool,
+                X = (float)pdfX,
+                Y = (float)pdfY,
+                Width = (float)pdfW,
+                Height = (float)pdfH,
+                StrokeWidth = strokeWidth,
+                StrokeR = 0,
+                StrokeG = 0,
+                StrokeB = 0,
+            };
+
+            await _viewModel.InsertShapeAsync(shapeParams);
+        }
+
+        e.Handled = true;
+    }
+
+    private void ShowInsertionTextBox(Point screenPos)
+    {
+        // Remove any existing insertion textbox
+        if (_activeTextBox != null)
+        {
+            PageCanvas.Children.Remove(_activeTextBox);
+            _activeTextBox = null;
+        }
+
+        var textBox = new TextBox
+        {
+            Text = "",
+            FontSize = 14,
+            Width = 200,
+            Height = 30,
+            AcceptsReturn = false,
+            BorderThickness = new Thickness(1.5),
+            BorderBrush = new SolidColorBrush(Colors.DodgerBlue),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(220, 255, 255, 255)),
+            Padding = new Thickness(4, 2, 4, 2),
+            PlaceholderText = "Tapez votre texte...",
+        };
+
+        textBox.KeyDown += OnInsertionTextBoxKeyDown;
+        textBox.LostFocus += OnInsertionTextBoxLostFocus;
+
+        Canvas.SetLeft(textBox, screenPos.X);
+        Canvas.SetTop(textBox, screenPos.Y);
+        PageCanvas.Children.Add(textBox);
+        _activeTextBox = textBox;
+
+        // Store the screen position for later PDF conversion
+        textBox.Tag = screenPos;
+
+        textBox.Focus(FocusState.Programmatic);
+    }
+
+    private async void OnInsertionTextBoxKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && sender is TextBox tb)
+        {
+            e.Handled = true;
+            await ApplyInsertionTextAsync(tb);
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            RemoveInsertionTextBox();
+        }
+    }
+
+    private void OnInsertionTextBoxLostFocus(object sender, RoutedEventArgs e)
+    {
+        // Check if focus went to format toolbar
+        if (FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement focused)
+        {
+            if (IsChildOf(focused, FormatToolbar))
+                return;
+        }
+        RemoveInsertionTextBox();
+    }
+
+    private void RemoveInsertionTextBox()
+    {
+        if (_activeTextBox != null)
+        {
+            _activeTextBox.KeyDown -= OnInsertionTextBoxKeyDown;
+            _activeTextBox.LostFocus -= OnInsertionTextBoxLostFocus;
+            PageCanvas.Children.Remove(_activeTextBox);
+            _activeTextBox = null;
+        }
+    }
+
+    private async Task ApplyInsertionTextAsync(TextBox tb)
+    {
+        var text = tb.Text;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            RemoveInsertionTextBox();
+            return;
+        }
+
+        var screenPos = tb.Tag is Point p ? p : new Point(0, 0);
+        var (pdfX, pdfY) = ScreenToPdfPoint(screenPos.X, screenPos.Y);
+
+        RemoveInsertionTextBox();
+
+        var parameters = new InsertTextParams
+        {
+            PageIndex = _viewModel.CurrentPageIndex,
+            X = (float)pdfX,
+            Y = (float)pdfY,
+            Text = text,
+            FontSize = 12f,
+        };
+
+        _preserveScrollOnRender = true;
+        await _viewModel.InsertTextAsync(parameters);
+    }
+
+    private async Task InsertImageAtAsync(Point screenPos)
+    {
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".bmp");
+        picker.FileTypeFilter.Add(".gif");
+        picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+        var file = await picker.PickSingleFileAsync();
+        if (file == null) return;
+
+        // Get image dimensions to maintain aspect ratio
+        float imgWidth = 200f;
+        float imgHeight = 200f;
+
+        try
+        {
+            using var stream = await file.OpenReadAsync();
+            var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(stream);
+            var pixelWidth = (float)decoder.PixelWidth;
+            var pixelHeight = (float)decoder.PixelHeight;
+
+            // Scale to reasonable PDF size (max 300pt on largest side)
+            var maxDim = 300f;
+            if (pixelWidth > pixelHeight)
+            {
+                imgWidth = maxDim;
+                imgHeight = maxDim * pixelHeight / pixelWidth;
+            }
+            else
+            {
+                imgHeight = maxDim;
+                imgWidth = maxDim * pixelWidth / pixelHeight;
+            }
+        }
+        catch
+        {
+            // Fallback to square
+        }
+
+        var (pdfX, pdfY) = ScreenToPdfPoint(screenPos.X, screenPos.Y);
+
+        var parameters = new InsertImageParams
+        {
+            PageIndex = _viewModel.CurrentPageIndex,
+            X = (float)pdfX,
+            Y = (float)(pdfY - imgHeight), // PDF Y is bottom-left, place image below click point
+            Width = imgWidth,
+            Height = imgHeight,
+            ImageFilePath = file.Path,
+        };
+
+        _preserveScrollOnRender = true;
+        await _viewModel.InsertImageAsync(parameters);
+    }
+
+    // ---- Form field modals ----
+
+    private async Task<string?> PickImageFileAsync()
+    {
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".bmp");
+        picker.FileTypeFilter.Add(".gif");
+        picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+        var file = await picker.PickSingleFileAsync();
+        return file?.Path;
+    }
+
+    private async Task<string?> ShowDatePickerDialogAsync()
+    {
+        var datePicker = new CalendarDatePicker
+        {
+            Date = DateTimeOffset.Now,
+            DateFormat = "{day.integer}/{month.integer}/{year.full}",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = "Sélectionner une date",
+            Content = datePicker,
+            PrimaryButtonText = "Valider",
+            CloseButtonText = "Annuler",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = this.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary || datePicker.Date == null)
+            return null;
+
+        return datePicker.Date.Value.ToString("dd/MM/yyyy");
     }
 
     // ---- File operations ----
@@ -1026,6 +1803,15 @@ public sealed partial class PdfViewerPage : UserControl
             ClearFormFieldOverlays();
             HideFormatToolbar();
             _textBlocks = null;
+
+            if (_isInsertionPanelOpen)
+            {
+                _isInsertionPanelOpen = false;
+                InsertionPanel.Width = 0;
+                InsertButton.Label = "Insérer";
+                CancelInsertionMode();
+            }
+
             await _viewModel.OpenDocumentAsync(file.Path);
         }
     }
@@ -1099,4 +1885,174 @@ public sealed partial class PdfViewerPage : UserControl
         if (_bitmapWidth > 0)
             ApplyImageSize();
     }
+
+    // ---- Field list tab ----
+
+    private List<FormField>? _allFieldsCache;
+    private List<FieldListItem>? _fieldListItems;
+
+    private async Task RefreshFieldListAsync()
+    {
+        await _viewModel.ExtractAllFormFieldsAsync();
+        _allFieldsCache = _viewModel.AllFormFields;
+
+        if (_allFieldsCache == null || _allFieldsCache.Count == 0)
+        {
+            FieldListView.ItemsSource = null;
+            _fieldListItems = null;
+            FieldListEmpty.Visibility = Visibility.Visible;
+            return;
+        }
+
+        FieldListEmpty.Visibility = Visibility.Collapsed;
+        _fieldListItems = _allFieldsCache
+            .OrderBy(f => f.PageIndex)
+            .ThenBy(f => f.FieldName)
+            .Select(f => new FieldListItem(f))
+            .ToList();
+
+        ApplyFieldSearchFilter();
+    }
+
+    private void OnFieldSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        ApplyFieldSearchFilter();
+    }
+
+    private void ApplyFieldSearchFilter()
+    {
+        if (_fieldListItems == null) return;
+
+        var query = FieldSearchBox.Text?.Trim() ?? "";
+        if (string.IsNullOrEmpty(query))
+        {
+            FieldListView.ItemsSource = _fieldListItems;
+        }
+        else
+        {
+            FieldListView.ItemsSource = _fieldListItems
+                .Where(i => i.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+    }
+
+    private Border? _fieldHighlight;
+
+    private async void OnFieldListItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not FieldListItem item) return;
+
+        var field = item.Field;
+
+        // Remove previous highlight
+        RemoveFieldHighlight();
+
+        // Navigate to the correct page if needed
+        if (field.PageIndex != _viewModel.CurrentPageIndex)
+        {
+            _viewModel.CurrentPageIndex = field.PageIndex;
+            await _viewModel.RenderCurrentPageAsync();
+        }
+
+        // Wait for layout to complete, then scroll and highlight
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            var (sx, sy, sw, sh) = FormFieldToScreen(field);
+
+            // Center the field in the viewport
+            var targetH = sx + sw / 2 - PageScrollViewer.ViewportWidth / 2;
+            var targetV = sy + sh / 2 - PageScrollViewer.ViewportHeight / 2;
+            targetH = Math.Max(0, targetH);
+            targetV = Math.Max(0, targetV);
+
+            PageScrollViewer.ChangeView(targetH, targetV, null, disableAnimation: false);
+
+            // Add highlight border
+            var highlight = new Border
+            {
+                Width = sw + 6,
+                Height = sh + 6,
+                BorderThickness = new Thickness(3),
+                BorderBrush = new SolidColorBrush(Colors.OrangeRed),
+                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(40, 255, 69, 0)),
+                CornerRadius = new CornerRadius(3),
+                IsHitTestVisible = false,
+            };
+
+            Canvas.SetLeft(highlight, sx - 3);
+            Canvas.SetTop(highlight, sy - 3);
+            PageCanvas.Children.Add(highlight);
+            _fieldHighlight = highlight;
+
+            // Blink animation: toggle opacity 3 times then stay solid
+            BlinkHighlight(highlight);
+        });
+    }
+
+    private async void BlinkHighlight(Border highlight)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            highlight.Opacity = 0.3;
+            await Task.Delay(150);
+            if (_fieldHighlight != highlight) return;
+            highlight.Opacity = 1.0;
+            await Task.Delay(150);
+            if (_fieldHighlight != highlight) return;
+        }
+    }
+
+    private void RemoveFieldHighlight()
+    {
+        if (_fieldHighlight != null)
+        {
+            PageCanvas.Children.Remove(_fieldHighlight);
+            _fieldHighlight = null;
+        }
+    }
+
+    // Refresh field list when the "Champs" tab is selected
+    private bool _fieldListPivotHandlerAttached;
+    private void EnsurePivotHandler()
+    {
+        if (_fieldListPivotHandlerAttached) return;
+        _fieldListPivotHandlerAttached = true;
+        SidePanelPivot.SelectionChanged += OnSidePanelPivotChanged;
+    }
+
+    private async void OnSidePanelPivotChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Index 1 = "Champs" tab
+        if (SidePanelPivot.SelectedIndex == 1 && _viewModel.HasDocument)
+        {
+            await RefreshFieldListAsync();
+        }
+    }
+}
+
+public class FieldListItem
+{
+    public FormField Field { get; }
+    public string Name => Field.FieldName;
+    public string TypeLabel => Field.FieldType switch
+    {
+        FormFieldType.Text => "Texte",
+        FormFieldType.Checkbox => "Case à cocher",
+        FormFieldType.RadioButton => "Bouton radio",
+        FormFieldType.Dropdown => "Liste déroulante",
+        FormFieldType.Signature => "Signature",
+        _ => "Inconnu"
+    };
+    public string PageLabel => $"p.{Field.PageIndex + 1}";
+    public string Icon => Field.FieldType switch
+    {
+        FormFieldType.Text => "\uE8D2",
+        FormFieldType.Checkbox => "\uE73A",
+        FormFieldType.RadioButton => "\uECCB",
+        FormFieldType.Dropdown => "\uE70D",
+        FormFieldType.Signature => "\uE8A3",
+        _ => "\uE946"
+    };
+
+    public FieldListItem(FormField field) => Field = field;
 }

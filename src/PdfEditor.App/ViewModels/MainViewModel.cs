@@ -12,6 +12,7 @@ public partial class MainViewModel : ObservableObject
     private readonly IPdfDocumentService _documentService;
     private readonly IPdfTextService _textService;
     private readonly IPdfFormService _formService;
+    private readonly IPdfContentService _contentService;
     private readonly UndoRedoService _undoRedo;
 
     private PdfDocumentModel? _document;
@@ -48,6 +49,12 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private List<FormField>? _currentFormFields;
 
+    [ObservableProperty]
+    private InsertionTool _activeTool;
+
+    [ObservableProperty]
+    private List<FormField>? _allFormFields;
+
     public bool HasDocument => _document != null;
     public string PageIndicator => HasDocument ? $"{CurrentPageIndex + 1} / {PageCount}" : "";
     public PdfDocumentModel? Document => _document;
@@ -57,12 +64,14 @@ public partial class MainViewModel : ObservableObject
         IPdfDocumentService documentService,
         IPdfTextService textService,
         IPdfFormService formService,
+        IPdfContentService contentService,
         UndoRedoService undoRedo)
     {
         _renderService = renderService;
         _documentService = documentService;
         _textService = textService;
         _formService = formService;
+        _contentService = contentService;
         _undoRedo = undoRedo;
     }
 
@@ -276,7 +285,7 @@ public partial class MainViewModel : ObservableObject
         CanRedo = _undoRedo.CanRedo;
     }
 
-    private async Task RenderCurrentPageAsync()
+    public async Task RenderCurrentPageAsync()
     {
         if (_document == null) return;
 
@@ -358,6 +367,21 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    public async Task ExtractAllFormFieldsAsync()
+    {
+        if (_document == null) return;
+
+        try
+        {
+            AllFormFields = await Task.Run(() =>
+                _formService.ExtractAllFormFields(_document.ActivePath));
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur liste champs: {ex.Message}";
+        }
+    }
+
     public async Task SetFormFieldValueAsync(string fieldName, string value)
     {
         if (_document == null) return;
@@ -377,6 +401,156 @@ public partial class MainViewModel : ObservableObject
             await RenderCurrentPageAsync();
 
             StatusText = "Champ modifié";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task InsertTextAsync(InsertTextParams parameters)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Insertion texte...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _contentService.InsertText(_document.ActivePath, parameters));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            InvalidateCache(CurrentPageIndex);
+            await RenderCurrentPageAsync();
+
+            StatusText = "Texte inséré";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task InsertImageAsync(InsertImageParams parameters)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Insertion image...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _contentService.InsertImage(_document.ActivePath, parameters));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            InvalidateCache(CurrentPageIndex);
+            await RenderCurrentPageAsync();
+
+            StatusText = "Image insérée";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task InsertShapeAsync(InsertShapeParams parameters)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Insertion forme...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _contentService.InsertShape(_document.ActivePath, parameters));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            InvalidateCache(CurrentPageIndex);
+            await RenderCurrentPageAsync();
+
+            StatusText = "Forme insérée";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task CreateFormFieldAsync(CreateFormFieldParams parameters)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Création champ...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _formService.CreateFormField(_document.ActivePath, parameters));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            InvalidateCache(CurrentPageIndex);
+            await RenderCurrentPageAsync();
+
+            StatusText = "Champ créé";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task UpdateFormFieldPropertiesAsync(FormFieldProperties properties)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Mise à jour champ...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _formService.UpdateFormFieldProperties(_document.ActivePath, properties));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            InvalidateCache(CurrentPageIndex);
+            await RenderCurrentPageAsync();
+
+            StatusText = "Champ mis à jour";
         }
         catch (Exception ex)
         {

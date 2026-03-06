@@ -36,6 +36,8 @@
             <AppBarSeparator />
             <AppBarButton x:Name="EditModeButton" Icon="Edit" Label="Éditer"
                           Click="OnEditModeClick" IsEnabled="False" />
+            <AppBarButton x:Name="InsertButton" Icon="Add" Label="Insérer"
+                          Click="OnInsertPanelToggle" IsEnabled="False" />
             <AppBarSeparator />
             <AppBarButton x:Name="ZoomOutButton" Icon="ZoomOut" Label="Zoom -"
                           Click="OnZoomOutClick" />
@@ -91,39 +93,242 @@
             </DropDownButton>
         </StackPanel>
 
-        <!-- PDF Page Display -->
-        <ScrollViewer x:Name="PageScrollViewer" Grid.Row="2"
-                      ZoomMode="Disabled"
-                      HorizontalScrollBarVisibility="Auto"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalAlignment="Stretch"
-                      VerticalAlignment="Stretch"
-                      Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-            <Canvas x:Name="PageCanvas"
-                    HorizontalAlignment="Center"
-                    Margin="0,20,0,20">
-                <!-- Rendered PDF page -->
-                <Image x:Name="PageImage"
-                       Stretch="Uniform"
+        <!-- PDF Page Display + Side Panel -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <ScrollViewer x:Name="PageScrollViewer" Grid.Column="0"
+                          ZoomMode="Disabled"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <Canvas x:Name="PageCanvas"
+                        HorizontalAlignment="Center"
+                        Margin="0,20,0,20">
+                    <!-- Rendered PDF page -->
+                    <Image x:Name="PageImage"
+                           Stretch="Uniform"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Top" />
+
+                    <!-- Loading indicator -->
+                    <ProgressRing x:Name="LoadingRing"
+                                  IsActive="False"
+                                  Width="48" Height="48" />
+
+                    <!-- Text block overlays are added dynamically in code-behind -->
+                </Canvas>
+            </ScrollViewer>
+
+            <!-- Empty state overlay -->
+            <TextBlock x:Name="EmptyStateText" Grid.Column="0"
+                       Text="Ouvrir un fichier PDF pour commencer"
                        HorizontalAlignment="Center"
-                       VerticalAlignment="Top" />
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       FontSize="16" />
 
-                <!-- Loading indicator -->
-                <ProgressRing x:Name="LoadingRing"
-                              IsActive="False"
-                              Width="48" Height="48" />
+            <!-- Side Panel -->
+            <Border x:Name="InsertionPanel" Grid.Column="1" Width="0"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1,0,0,0">
+                <Pivot x:Name="SidePanelPivot">
 
-                <!-- Text block overlays are added dynamically in code-behind -->
-            </Canvas>
-        </ScrollViewer>
+                    <!-- Tab 1: Insérer -->
+                    <PivotItem Header="Insérer">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Spacing="16" Padding="12">
 
-        <!-- Empty state overlay -->
-        <TextBlock x:Name="EmptyStateText" Grid.Row="2"
-                   Text="Ouvrir un fichier PDF pour commencer"
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Center"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                   FontSize="16" />
+                                <!-- Text section -->
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Texte" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <Button x:Name="InsertTextBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertTextClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE8D2;" FontSize="16" />
+                                            <TextBlock Text="Ajouter du texte" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+
+                                <!-- Image section -->
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Image" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <Button x:Name="InsertImageBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertImageClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xEB9F;" FontSize="16" />
+                                            <TextBlock Text="Insérer une image" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+
+                                <!-- Shapes section -->
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Formes" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <Button x:Name="InsertLineBtn" Width="60" Height="40"
+                                                Click="OnInsertLineClick" ToolTipService.ToolTip="Ligne">
+                                            <FontIcon Glyph="&#xF1CB;" FontSize="16" />
+                                        </Button>
+                                        <Button x:Name="InsertRectBtn" Width="60" Height="40"
+                                                Click="OnInsertRectClick" ToolTipService.ToolTip="Rectangle">
+                                            <FontIcon Glyph="&#xEDA1;" FontSize="16" />
+                                        </Button>
+                                        <Button x:Name="InsertCircleBtn" Width="60" Height="40"
+                                                Click="OnInsertCircleClick" ToolTipService.ToolTip="Cercle">
+                                            <FontIcon Glyph="&#xEA3A;" FontSize="16" />
+                                        </Button>
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Shape options -->
+                                <StackPanel x:Name="ShapeOptionsPanel" Spacing="6" Visibility="Collapsed">
+                                    <TextBlock Text="Options" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="Épaisseur" VerticalAlignment="Center" />
+                                        <NumberBox x:Name="StrokeWidthBox" Width="80" Minimum="0.5" Maximum="20"
+                                                   Value="1" SpinButtonPlacementMode="Compact" SmallChange="0.5" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Separator -->
+                                <Border Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+
+                                <!-- Form fields creation section -->
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Champs de formulaire" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <Button x:Name="InsertFormTextBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormTextClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE8D2;" FontSize="16" />
+                                            <TextBlock Text="Champ de texte" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="InsertFormCheckboxBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormCheckboxClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE73A;" FontSize="16" />
+                                            <TextBlock Text="Case à cocher" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="InsertFormRadioBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormRadioClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xECCB;" FontSize="16" />
+                                            <TextBlock Text="Bouton radio" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="InsertFormDropdownBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormDropdownClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE70D;" FontSize="16" />
+                                            <TextBlock Text="Liste déroulante" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="InsertFormImageBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormImageClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xEB9F;" FontSize="16" />
+                                            <TextBlock Text="Champ image" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="InsertFormDateBtn" HorizontalAlignment="Stretch"
+                                            Click="OnInsertFormDateClick">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE787;" FontSize="16" />
+                                            <TextBlock Text="Champ date" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+
+                                <!-- Form field options -->
+                                <StackPanel x:Name="FormFieldOptionsPanel" Spacing="6" Visibility="Collapsed">
+                                    <TextBlock Text="Propriétés" FontWeight="SemiBold" FontSize="14"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBox x:Name="FormFieldNameBox" PlaceholderText="Nom du champ"
+                                             Header="Nom" />
+                                    <StackPanel x:Name="FormFieldOptionsListPanel" Spacing="4" Visibility="Collapsed">
+                                        <TextBox x:Name="FormFieldOptionsBox" PlaceholderText="Option 1, Option 2, Option 3"
+                                                 Header="Options (séparées par virgule)" />
+                                    </StackPanel>
+                                    <StackPanel x:Name="FormFieldRadioGroupPanel" Spacing="4" Visibility="Collapsed">
+                                        <TextBox x:Name="FormFieldRadioGroupBox" PlaceholderText="groupe1"
+                                                 Header="Nom du groupe" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                            </StackPanel>
+                        </ScrollViewer>
+                    </PivotItem>
+
+                    <!-- Tab 2: Champs -->
+                    <PivotItem Header="Champs">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Search box -->
+                            <TextBox x:Name="FieldSearchBox" Grid.Row="0"
+                                     PlaceholderText="Rechercher un champ..."
+                                     Margin="8,8,8,4"
+                                     TextChanged="OnFieldSearchTextChanged" />
+
+                            <!-- Field list -->
+                            <ListView x:Name="FieldListView" Grid.Row="1"
+                                      Margin="4,4,4,4"
+                                      SelectionMode="Single"
+                                      ItemClick="OnFieldListItemClick"
+                                      IsItemClickEnabled="True">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="4,6" ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <FontIcon Grid.Column="0" FontSize="14"
+                                                       Glyph="{Binding Icon}"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding TypeLabel}" FontSize="11"
+                                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2" Text="{Binding PageLabel}" FontSize="11"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+
+                            <!-- Empty state -->
+                            <TextBlock x:Name="FieldListEmpty" Grid.Row="1"
+                                       Text="Aucun champ de formulaire"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       FontSize="13" Visibility="Collapsed" />
+                        </Grid>
+                    </PivotItem>
+
+                </Pivot>
+            </Border>
+        </Grid>
 
         <!-- Status Bar -->
         <Grid Grid.Row="3" Padding="12,6"

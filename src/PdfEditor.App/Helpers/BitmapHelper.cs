@@ -13,13 +13,22 @@ public static class BitmapHelper
         var bitmap = new WriteableBitmap(width, height);
 
         // Ensure BGRA8888 format for WriteableBitmap compatibility
-        using var converted = skBitmap.ColorType == SKColorType.Bgra8888
-            ? skBitmap
-            : ConvertToBgra8888(skBitmap);
+        // Do NOT dispose the original bitmap — it may be cached.
+        var needsConversion = skBitmap.ColorType != SKColorType.Bgra8888;
+        var converted = needsConversion ? ConvertToBgra8888(skBitmap) : skBitmap;
 
-        var pixels = converted.GetPixelSpan();
-        using var stream = bitmap.PixelBuffer.AsStream();
-        stream.Write(pixels);
+        try
+        {
+            var pixels = converted.GetPixelSpan();
+            using var stream = bitmap.PixelBuffer.AsStream();
+            stream.Write(pixels);
+        }
+        finally
+        {
+            // Only dispose the temporary conversion, never the original
+            if (needsConversion)
+                converted.Dispose();
+        }
 
         bitmap.Invalidate();
         return bitmap;

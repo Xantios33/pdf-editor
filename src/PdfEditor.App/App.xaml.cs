@@ -21,6 +21,7 @@ public partial class App : Application
         services.AddSingleton<IPdfDocumentService, PdfDocumentService>();
         services.AddSingleton<IPdfTextService, PdfTextService>();
         services.AddSingleton<IPdfFormService, PdfFormService>();
+        services.AddSingleton<IPdfContentService, PdfContentService>();
         services.AddSingleton<UndoRedoService>();
 
         // ViewModels
