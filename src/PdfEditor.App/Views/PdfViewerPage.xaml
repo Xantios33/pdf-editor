@@ -16,6 +16,11 @@
 
         <!-- Toolbar -->
         <CommandBar Grid.Row="0" DefaultLabelPosition="Right" IsOpen="False">
+            <AppBarButton x:Name="NewButton" Label="Nouveau" Click="OnNewClick">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE7C3;" />
+                </AppBarButton.Icon>
+            </AppBarButton>
             <AppBarButton x:Name="OpenButton" Icon="OpenFile" Label="Ouvrir"
                           Click="OnOpenClick" />
             <AppBarButton x:Name="SaveButton" Icon="Save" Label="Sauvegarder"
@@ -43,6 +48,12 @@
                           Click="OnZoomOutClick" />
             <AppBarButton x:Name="ZoomInButton" Icon="ZoomIn" Label="Zoom +"
                           Click="OnZoomInClick" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="GridButton" Label="Grille" Click="OnGridToggle">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xF0E2;" />
+                </AppBarButton.Icon>
+            </AppBarButton>
             <AppBarSeparator />
             <AppBarButton x:Name="PrevButton" Icon="Previous" Label="Précédent"
                           Click="OnPrevPageClick" IsEnabled="False" />

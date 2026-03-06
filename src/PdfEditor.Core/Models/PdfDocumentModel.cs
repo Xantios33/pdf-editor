@@ -6,6 +6,7 @@ public class PdfDocumentModel
     public string? WorkingCopyPath { get; set; }
     public int PageCount { get; set; }
     public bool HasUnsavedChanges { get; set; }
+    public bool IsNew { get; set; }
 
     /// <summary>
     /// Returns the path to use for rendering/reading (working copy if available).

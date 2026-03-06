@@ -75,6 +75,39 @@ public partial class MainViewModel : ObservableObject
         _undoRedo = undoRedo;
     }
 
+    public async Task CreateDocumentAsync(int pageCount = 1, float width = 595f, float height = 842f)
+    {
+        try
+        {
+            IsLoading = true;
+            StatusText = "Création...";
+
+            if (_document != null)
+            {
+                _documentService.Close(_document);
+                ClearCache();
+            }
+
+            _undoRedo.Clear();
+            UpdateUndoRedoState();
+
+            _document = await Task.Run(() => _documentService.CreateBlank(pageCount, width, height));
+            PageCount = _document.PageCount;
+            CurrentPageIndex = 0;
+
+            await RenderCurrentPageAsync();
+            StatusText = "Nouveau document";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
     public async Task OpenDocumentAsync(string filePath)
     {
         try
@@ -130,11 +163,32 @@ public partial class MainViewModel : ObservableObject
     private async Task Save()
     {
         if (_document == null) return;
+        if (_document.IsNew)
+        {
+            // New documents must be saved via SaveAs (handled by code-behind)
+            return;
+        }
         try
         {
             StatusText = "Sauvegarde...";
             await Task.Run(() => _documentService.Save(_document));
             StatusText = $"Sauvegardé: {Path.GetFileName(_document.FilePath)}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+    }
+
+    public async Task SaveAsAsync(string newPath)
+    {
+        if (_document == null) return;
+        try
+        {
+            StatusText = "Sauvegarde...";
+            await Task.Run(() => _documentService.SaveAs(_document, newPath));
+            _document.IsNew = false;
+            StatusText = $"Sauvegardé: {Path.GetFileName(newPath)}";
         }
         catch (Exception ex)
         {

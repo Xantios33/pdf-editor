@@ -1,6 +1,6 @@
 namespace PdfEditor.Core.Models;
 
-public enum FormFieldType { Text, Checkbox, Dropdown, RadioButton, Signature, Unknown }
+public enum FormFieldType { Text, Checkbox, Dropdown, RadioButton, PushButton, Signature, Unknown }
 
 public class FormField
 {
@@ -14,6 +14,7 @@ public class FormField
     public float Height { get; set; }
     public int PageIndex { get; set; }
     public bool IsReadOnly { get; set; }
+    public string? OnAppearanceName { get; set; }
 }
 
 public class FormFieldProperties

@@ -132,6 +132,25 @@ public class PdfFormService : IPdfFormService
             var width = Math.Abs(urx - llx);
             var height = Math.Abs(ury - lly);
 
+            // For checkbox/radio: find the "on" appearance name from /AP /N
+            string? onAppearanceName = null;
+            if (fieldType == FormFieldType.Checkbox || fieldType == FormFieldType.RadioButton)
+            {
+                var ap = widgetDict.GetAsDictionary(PdfName.AP);
+                var normal = ap?.GetAsDictionary(PdfName.N);
+                if (normal != null)
+                {
+                    foreach (var key in normal.KeySet())
+                    {
+                        if (key.GetValue() != "Off")
+                        {
+                            onAppearanceName = key.GetValue();
+                            break;
+                        }
+                    }
+                }
+            }
+
             result.Add(new FormField
             {
                 FieldName = fieldName,
@@ -144,6 +163,7 @@ public class PdfFormService : IPdfFormService
                 Height = height,
                 PageIndex = pageIndex,
                 IsReadOnly = isReadOnly,
+                OnAppearanceName = onAppearanceName,
             });
         }
 
@@ -301,7 +321,11 @@ public class PdfFormService : IPdfFormService
                     .SetCaption("")
                     .CreatePushButton();
                 if (!string.IsNullOrEmpty(p.ImageFilePath))
+                {
                     imageBtn.SetImage(p.ImageFilePath);
+                    // Store image path for later resize/regeneration
+                    imageBtn.GetPdfObject().Put(new PdfName("ImagePath"), new PdfString(p.ImageFilePath));
+                }
                 form.AddField(imageBtn, page);
                 break;
 
@@ -374,7 +398,27 @@ public class PdfFormService : IPdfFormService
                 UpdateWidgetRect(field, props);
 
                 field.GetPdfObject().SetModified();
-                field.RegenerateField();
+
+                // PushButtons (images): re-apply image so it fills the new rect
+                if (field is PdfButtonFormField btn && btn.IsPushButton())
+                {
+                    var imgPath = field.GetPdfObject().GetAsString(new PdfName("ImagePath"));
+                    if (imgPath != null && File.Exists(imgPath.ToUnicodeString()))
+                    {
+                        btn.SetImage(imgPath.ToUnicodeString());
+                        btn.RegenerateField();
+                    }
+                    // else: keep existing appearance, just update BBox
+                    else
+                    {
+                        UpdatePushButtonAppearance(field, props);
+                    }
+                }
+                else
+                {
+                    field.RegenerateField();
+                }
+
                 pdfDoc.Close();
                 return;
             }
@@ -429,8 +473,15 @@ public class PdfFormService : IPdfFormService
                     dict.Put(PdfName.Rect, newRect);
                 }
 
-                // Remove cached appearance to regenerate
-                dict.Remove(PdfName.AP);
+                // Remove cached appearance to regenerate (except push buttons with images)
+                var ftOrphan = dict.GetAsName(PdfName.FT)
+                    ?? dict.GetAsDictionary(PdfName.Parent)?.GetAsName(PdfName.FT);
+                var ffOrphan = dict.GetAsNumber(PdfName.Ff)?.IntValue() ?? 0;
+                var isPushBtn = PdfName.Btn.Equals(ftOrphan) && (ffOrphan & (1 << 16)) != 0;
+                if (isPushBtn)
+                    UpdateOrphanPushButtonAppearance(dict, props);
+                else
+                    dict.Remove(PdfName.AP);
                 dict.SetModified();
                 pdfDoc.Close();
                 return;
@@ -464,6 +515,66 @@ public class PdfFormService : IPdfFormService
 
         var newRect = new Rectangle(x, y, w, h);
         widget.SetRectangle(new iText.Kernel.Pdf.PdfArray(new float[] { x, y, x + w, y + h }));
+    }
+
+    /// <summary>
+    /// Updates the BBox of the appearance stream for a PushButton (AcroForm field)
+    /// so the image scales to the new widget rectangle.
+    /// </summary>
+    private static void UpdatePushButtonAppearance(PdfFormField field, FormFieldProperties props)
+    {
+        var widgets = field.GetWidgets();
+        if (widgets == null || widgets.Count == 0) return;
+
+        var widget = widgets[0];
+        var rect = widget.GetRectangle();
+        if (rect == null) return;
+
+        var w = props.Width ?? (rect.GetAsNumber(2).FloatValue() - rect.GetAsNumber(0).FloatValue());
+        var h = props.Height ?? (rect.GetAsNumber(3).FloatValue() - rect.GetAsNumber(1).FloatValue());
+
+        UpdateApBBox(widget.GetPdfObject(), Math.Abs(w), Math.Abs(h));
+    }
+
+    /// <summary>
+    /// Updates the BBox of the appearance stream for an orphan PushButton widget.
+    /// </summary>
+    private static void UpdateOrphanPushButtonAppearance(PdfDictionary dict, FormFieldProperties props)
+    {
+        var rect = dict.GetAsArray(PdfName.Rect);
+        if (rect == null) return;
+
+        var w = props.Width ?? Math.Abs(rect.GetAsNumber(2).FloatValue() - rect.GetAsNumber(0).FloatValue());
+        var h = props.Height ?? Math.Abs(rect.GetAsNumber(3).FloatValue() - rect.GetAsNumber(1).FloatValue());
+
+        UpdateApBBox(dict, Math.Abs(w), Math.Abs(h));
+    }
+
+    private static void UpdateApBBox(PdfDictionary widgetDict, float w, float h)
+    {
+        var ap = widgetDict.GetAsDictionary(PdfName.AP);
+        if (ap == null) return;
+
+        // Update BBox in /N (normal appearance)
+        var normal = ap.Get(PdfName.N);
+        if (normal is PdfStream stream)
+        {
+            stream.Put(new PdfName("BBox"), new PdfArray(new float[] { 0, 0, w, h }));
+            stream.SetModified();
+        }
+        else if (normal is PdfDictionary normalDict)
+        {
+            // Could be a dictionary of appearance states
+            foreach (var key in normalDict.KeySet())
+            {
+                var val = normalDict.Get(key);
+                if (val is PdfStream stateStream)
+                {
+                    stateStream.Put(new PdfName("BBox"), new PdfArray(new float[] { 0, 0, w, h }));
+                    stateStream.SetModified();
+                }
+            }
+        }
     }
 
     private static string ReadFieldName(PdfDictionary dict)
@@ -502,10 +613,12 @@ public class PdfFormService : IPdfFormService
             return FormFieldType.Dropdown;
         if (PdfName.Btn.Equals(ft))
         {
-            // Check flags for radio vs checkbox
             var ff = dict.GetAsNumber(PdfName.Ff);
-            if (ff != null && (ff.IntValue() & (1 << 15)) != 0) // bit 16 = Radio
+            var flags = ff?.IntValue() ?? 0;
+            if ((flags & (1 << 15)) != 0) // bit 16 = Radio
                 return FormFieldType.RadioButton;
+            if ((flags & (1 << 16)) != 0) // bit 17 = PushButton
+                return FormFieldType.PushButton;
             return FormFieldType.Checkbox;
         }
         if (PdfName.Sig.Equals(ft))
@@ -588,7 +701,7 @@ public class PdfFormService : IPdfFormService
     {
         var asObj = dict.GetAsName(new PdfName("AS"));
         if (asObj != null && asObj.GetValue() != "Off")
-            return "Yes"; // checked
+            return asObj.GetValue(); // Return actual appearance name (e.g. "Yes", "Option1")
         return "Off";
     }
 
@@ -602,6 +715,8 @@ public class PdfFormService : IPdfFormService
         {
             if (buttonField.IsRadio())
                 return FormFieldType.RadioButton;
+            if (buttonField.IsPushButton())
+                return FormFieldType.PushButton;
             return FormFieldType.Checkbox;
         }
         if (field is PdfSignatureFormField)

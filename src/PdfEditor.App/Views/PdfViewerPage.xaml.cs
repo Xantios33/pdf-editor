@@ -53,6 +53,25 @@ public sealed partial class PdfViewerPage : UserControl
     private Point _insertionDragStart;
     private Microsoft.UI.Xaml.Shapes.Rectangle? _insertionPreview;
 
+    // Form field selection/resize state
+    private FormField? _selectedField;
+    private Border? _selectedFieldBorder;
+    private readonly List<Border> _resizeHandles = new();
+    private string? _activeResizeHandle;
+    private Point _resizeStart;
+    private double _selOrigX, _selOrigY, _selOrigW, _selOrigH;
+    private bool _isMovingField;
+    private bool _isMovePointerDown;
+    private Point _moveStart;
+    private double _moveOrigLeft, _moveOrigTop;
+
+    // Grid & snap state
+    private const double GridSize = 20.0;
+    private const double SnapThreshold = 8.0;
+    private bool _isGridVisible;
+    private readonly List<Line> _gridLines = new();
+    private readonly List<Line> _snapGuides = new();
+
     // Format toolbar state — suppress change events during sync
     private bool _syncingToolbar;
 
@@ -89,10 +108,18 @@ public sealed partial class PdfViewerPage : UserControl
 
     private void OnPageKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == VirtualKey.Escape && _activeInsertionTool != InsertionTool.None)
+        if (e.Key == VirtualKey.Escape)
         {
-            CancelInsertionMode();
-            e.Handled = true;
+            if (_selectedField != null)
+            {
+                DeselectFormField();
+                e.Handled = true;
+            }
+            else if (_activeInsertionTool != InsertionTool.None)
+            {
+                CancelInsertionMode();
+                e.Handled = true;
+            }
         }
     }
 
@@ -220,6 +247,9 @@ public sealed partial class PdfViewerPage : UserControl
 
         if (!_isEditMode && _formFieldOverlays.Count > 0)
             RepositionFormFieldOverlays();
+
+        if (_isGridVisible)
+            DrawGrid();
     }
 
     private void CenterScrollAfterLayout()
@@ -422,8 +452,11 @@ public sealed partial class PdfViewerPage : UserControl
             _dragBorder.Opacity = 0.7;
         }
 
-        Canvas.SetLeft(_dragBorder, _dragOriginalLeft + dx);
-        Canvas.SetTop(_dragBorder, _dragOriginalTop + dy);
+        var newLeft = SnapToGrid(_dragOriginalLeft + dx);
+        var newTop = SnapToGrid(_dragOriginalTop + dy);
+        (newLeft, newTop) = SnapToFields(newLeft, newTop, _dragBorder.Width, _dragBorder.Height, _dragBorder);
+        Canvas.SetLeft(_dragBorder, newLeft);
+        Canvas.SetTop(_dragBorder, newTop);
 
         e.Handled = true;
     }
@@ -433,6 +466,7 @@ public sealed partial class PdfViewerPage : UserControl
         if (_dragBorder == null || _dragBlock == null)
             return;
 
+        ClearSnapGuides();
         _dragBorder.ReleasePointerCapture(e.Pointer);
         var wasDragging = _isDragging;
         var border = _dragBorder;
@@ -863,6 +897,14 @@ public sealed partial class PdfViewerPage : UserControl
             return;
         }
 
+        // In insertion mode: select field for resize/move instead of inline editing
+        if (_isInsertionPanelOpen)
+        {
+            e.Handled = true;
+            SelectFormField(border, field);
+            return;
+        }
+
         e.Handled = true;
         CloseActiveFormEditor();
 
@@ -901,10 +943,18 @@ public sealed partial class PdfViewerPage : UserControl
                 textBox.SelectAll();
                 return;
 
+            case FormFieldType.PushButton:
+                // No inline editor for push buttons (images)
+                border.Visibility = Visibility.Visible;
+                _activeFormBorder = null;
+                return;
+
             case FormFieldType.Checkbox:
             case FormFieldType.RadioButton:
                 // Toggle immediately, no editor needed
-                var newVal = (field.CurrentValue == "Yes" || field.CurrentValue == "On") ? "Off" : "Yes";
+                var isOn = field.CurrentValue != null && field.CurrentValue != "Off";
+                var onName = field.OnAppearanceName ?? "Yes";
+                var newVal = isOn ? "Off" : onName;
                 border.Visibility = Visibility.Visible;
                 _activeFormBorder = null;
                 _ = ApplyFormFieldValueAsync(field, newVal);
@@ -989,6 +1039,7 @@ public sealed partial class PdfViewerPage : UserControl
 
     private void ClearFormFieldOverlays()
     {
+        DeselectFormField();
         CloseActiveFormEditor();
 
         foreach (var overlay in _formFieldOverlays)
@@ -1088,6 +1139,358 @@ public sealed partial class PdfViewerPage : UserControl
             e.Handled = true;
             _ = ShowFormFieldPropertiesDialog(field);
         }
+    }
+
+    // ---- Form field selection / resize / move ----
+
+    private void SelectFormField(Border border, FormField field)
+    {
+        DeselectFormField();
+
+        _selectedField = field;
+        _selectedFieldBorder = border;
+
+        // Highlight the selected border
+        border.BorderBrush = new SolidColorBrush(Colors.DodgerBlue);
+        border.BorderThickness = new Thickness(2);
+
+        // Create 8 resize handles
+        var handlePositions = new[] { "tl", "t", "tr", "l", "r", "bl", "b", "br" };
+        foreach (var pos in handlePositions)
+        {
+            var handle = new Border
+            {
+                Width = 8,
+                Height = 8,
+                Background = new SolidColorBrush(Colors.White),
+                BorderBrush = new SolidColorBrush(Colors.DodgerBlue),
+                BorderThickness = new Thickness(1.5),
+                Tag = pos,
+                CornerRadius = new CornerRadius(1),
+            };
+
+            handle.PointerPressed += OnResizeHandlePressed;
+            handle.PointerMoved += OnResizeHandleMoved;
+            handle.PointerReleased += OnResizeHandleReleased;
+            handle.PointerEntered += OnResizeHandleEntered;
+            handle.PointerExited += OnResizeHandleExited;
+
+            PageCanvas.Children.Add(handle);
+            _resizeHandles.Add(handle);
+        }
+
+        PositionResizeHandles();
+
+        // Also allow move by dragging the border itself
+        border.PointerPressed -= OnFormBorderPressed;
+        border.PointerPressed += OnSelectedFieldPointerPressed;
+        border.PointerMoved += OnSelectedFieldPointerMoved;
+        border.PointerReleased += OnSelectedFieldPointerReleased;
+    }
+
+    private void DeselectFormField()
+    {
+        if (_selectedFieldBorder != null)
+        {
+            _selectedFieldBorder.PointerPressed -= OnSelectedFieldPointerPressed;
+            _selectedFieldBorder.PointerMoved -= OnSelectedFieldPointerMoved;
+            _selectedFieldBorder.PointerReleased -= OnSelectedFieldPointerReleased;
+            PageCanvas.Children.Remove(_selectedFieldBorder);
+            _formFieldOverlays.Remove(_selectedFieldBorder);
+        }
+
+        foreach (var handle in _resizeHandles)
+        {
+            handle.PointerPressed -= OnResizeHandlePressed;
+            handle.PointerMoved -= OnResizeHandleMoved;
+            handle.PointerReleased -= OnResizeHandleReleased;
+            handle.PointerEntered -= OnResizeHandleEntered;
+            handle.PointerExited -= OnResizeHandleExited;
+            PageCanvas.Children.Remove(handle);
+        }
+        _resizeHandles.Clear();
+
+        _selectedField = null;
+        _selectedFieldBorder = null;
+        _activeResizeHandle = null;
+        _isMovingField = false;
+        _isMovePointerDown = false;
+
+        ClearSnapGuides();
+
+        // Restore cursor
+        ProtectedCursor = _activeInsertionTool != InsertionTool.None
+            ? InputSystemCursor.Create(InputSystemCursorShape.Cross)
+            : null;
+    }
+
+    private void PositionResizeHandles()
+    {
+        if (_selectedFieldBorder == null) return;
+
+        var x = Canvas.GetLeft(_selectedFieldBorder);
+        var y = Canvas.GetTop(_selectedFieldBorder);
+        var w = _selectedFieldBorder.Width;
+        var h = _selectedFieldBorder.Height;
+        const double hs = 4; // half handle size
+
+        foreach (var handle in _resizeHandles)
+        {
+            var tag = (string)handle.Tag;
+            double hx = tag switch
+            {
+                "tl" or "l" or "bl" => x - hs,
+                "t" or "b" => x + w / 2 - hs,
+                "tr" or "r" or "br" => x + w - hs,
+                _ => x,
+            };
+            double hy = tag switch
+            {
+                "tl" or "t" or "tr" => y - hs,
+                "l" or "r" => y + h / 2 - hs,
+                "bl" or "b" or "br" => y + h - hs,
+                _ => y,
+            };
+            Canvas.SetLeft(handle, hx);
+            Canvas.SetTop(handle, hy);
+        }
+    }
+
+    private void OnResizeHandleEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border handle) return;
+        var tag = (string)handle.Tag;
+        var cursor = tag switch
+        {
+            "tl" or "br" => InputSystemCursorShape.SizeNorthwestSoutheast,
+            "tr" or "bl" => InputSystemCursorShape.SizeNortheastSouthwest,
+            "t" or "b" => InputSystemCursorShape.SizeNorthSouth,
+            "l" or "r" => InputSystemCursorShape.SizeWestEast,
+            _ => InputSystemCursorShape.Arrow,
+        };
+        ProtectedCursor = InputSystemCursor.Create(cursor);
+    }
+
+    private void OnResizeHandleExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (_activeResizeHandle == null)
+            ProtectedCursor = _activeInsertionTool != InsertionTool.None
+                ? InputSystemCursor.Create(InputSystemCursorShape.Cross)
+                : null;
+    }
+
+    private void OnResizeHandlePressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border handle || _selectedFieldBorder == null) return;
+
+        _activeResizeHandle = (string)handle.Tag;
+        _resizeStart = e.GetCurrentPoint(PageCanvas).Position;
+        _selOrigX = Canvas.GetLeft(_selectedFieldBorder);
+        _selOrigY = Canvas.GetTop(_selectedFieldBorder);
+        _selOrigW = _selectedFieldBorder.Width;
+        _selOrigH = _selectedFieldBorder.Height;
+
+        handle.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void OnResizeHandleMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_activeResizeHandle == null || _selectedFieldBorder == null) return;
+
+        var pos = e.GetCurrentPoint(PageCanvas).Position;
+        var dx = pos.X - _resizeStart.X;
+        var dy = pos.Y - _resizeStart.Y;
+
+        var newX = _selOrigX;
+        var newY = _selOrigY;
+        var newW = _selOrigW;
+        var newH = _selOrigH;
+
+        // Adjust based on handle position
+        if (_activeResizeHandle.Contains('l'))
+        {
+            newX = _selOrigX + dx;
+            newW = _selOrigW - dx;
+        }
+        if (_activeResizeHandle.Contains('r'))
+        {
+            newW = _selOrigW + dx;
+        }
+        if (_activeResizeHandle.StartsWith('t'))
+        {
+            newY = _selOrigY + dy;
+            newH = _selOrigH - dy;
+        }
+        if (_activeResizeHandle.StartsWith('b') || _activeResizeHandle == "b")
+        {
+            newH = _selOrigH + dy;
+        }
+
+        // Enforce minimum size
+        if (newW < 10) { newW = 10; if (_activeResizeHandle.Contains('l')) newX = _selOrigX + _selOrigW - 10; }
+        if (newH < 10) { newH = 10; if (_activeResizeHandle.StartsWith('t')) newY = _selOrigY + _selOrigH - 10; }
+
+        // Snap to grid
+        newX = SnapToGrid(newX);
+        newY = SnapToGrid(newY);
+        newW = SnapToGrid(newW);
+        newH = SnapToGrid(newH);
+        if (newW < 10) newW = 10;
+        if (newH < 10) newH = 10;
+
+        Canvas.SetLeft(_selectedFieldBorder, newX);
+        Canvas.SetTop(_selectedFieldBorder, newY);
+        _selectedFieldBorder.Width = newW;
+        _selectedFieldBorder.Height = newH;
+
+        PositionResizeHandles();
+        e.Handled = true;
+    }
+
+    private async void OnResizeHandleReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Border handle)
+        {
+            try { handle.ReleasePointerCapture(e.Pointer); } catch { /* already released */ }
+        }
+
+        if (_activeResizeHandle == null || _selectedFieldBorder == null || _selectedField == null)
+            return;
+
+        _activeResizeHandle = null;
+        e.Handled = true;
+
+        // Convert new screen rect to PDF coordinates
+        var screenX = Canvas.GetLeft(_selectedFieldBorder);
+        var screenY = Canvas.GetTop(_selectedFieldBorder);
+        var screenW = _selectedFieldBorder.Width;
+        var screenH = _selectedFieldBorder.Height;
+
+        var (pdfLeft, pdfTop) = ScreenToPdfPoint(screenX, screenY);
+        var (pdfRight, pdfBottom) = ScreenToPdfPoint(screenX + screenW, screenY + screenH);
+
+        var pdfX = Math.Min(pdfLeft, pdfRight);
+        var pdfY = Math.Min(pdfTop, pdfBottom);
+        var pdfW = Math.Abs(pdfRight - pdfLeft);
+        var pdfH = Math.Abs(pdfTop - pdfBottom);
+
+        var props = new FormFieldProperties
+        {
+            OriginalFieldName = _selectedField.FieldName,
+            PageIndex = _selectedField.PageIndex,
+            X = (float)pdfX,
+            Y = (float)pdfY,
+            Width = (float)pdfW,
+            Height = (float)pdfH,
+        };
+
+        _preserveScrollOnRender = true;
+        DeselectFormField();
+        await _viewModel.UpdateFormFieldPropertiesAsync(props);
+        // ShowFormFieldOverlaysAsync is called automatically via PropertyChanged after re-render
+    }
+
+    // ---- Move selected field by dragging ----
+
+    private void OnSelectedFieldPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border border || border.Tag is not FormField field) return;
+
+        // Right-click → properties dialog
+        var point = e.GetCurrentPoint(border);
+        if (point.Properties.IsRightButtonPressed)
+        {
+            e.Handled = true;
+            _ = ShowFormFieldPropertiesDialog(field);
+            return;
+        }
+
+        _isMovePointerDown = true;
+        _isMovingField = false;
+        _moveStart = e.GetCurrentPoint(PageCanvas).Position;
+        _moveOrigLeft = Canvas.GetLeft(border);
+        _moveOrigTop = Canvas.GetTop(border);
+        border.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void OnSelectedFieldPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isMovePointerDown || sender is not Border border || _selectedFieldBorder != border)
+            return;
+
+        var pos = e.GetCurrentPoint(PageCanvas).Position;
+        var dx = pos.X - _moveStart.X;
+        var dy = pos.Y - _moveStart.Y;
+
+        if (!_isMovingField)
+        {
+            if (Math.Abs(dx) < DragThreshold && Math.Abs(dy) < DragThreshold)
+                return;
+            _isMovingField = true;
+            border.Opacity = 0.7;
+            ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.SizeAll);
+        }
+
+        var newLeft = SnapToGrid(_moveOrigLeft + dx);
+        var newTop = SnapToGrid(_moveOrigTop + dy);
+        (newLeft, newTop) = SnapToFields(newLeft, newTop, border.Width, border.Height, border);
+        Canvas.SetLeft(border, newLeft);
+        Canvas.SetTop(border, newTop);
+        PositionResizeHandles();
+        e.Handled = true;
+    }
+
+    private async void OnSelectedFieldPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border border) return;
+
+        try { border.ReleasePointerCapture(e.Pointer); } catch { /* already released */ }
+
+        ClearSnapGuides();
+        var wasMoving = _isMovingField;
+        _isMovePointerDown = false;
+        _isMovingField = false;
+        border.Opacity = 1.0;
+
+        // Restore cursor
+        ProtectedCursor = _activeInsertionTool != InsertionTool.None
+            ? InputSystemCursor.Create(InputSystemCursorShape.Cross)
+            : null;
+
+        if (!wasMoving || _selectedField == null)
+            return;
+
+        e.Handled = true;
+
+        // Convert new position to PDF coords — include width/height for correct rect
+        var screenX = Canvas.GetLeft(border);
+        var screenY = Canvas.GetTop(border);
+        var screenW = border.Width;
+        var screenH = border.Height;
+
+        var (pdfLeft, pdfTop) = ScreenToPdfPoint(screenX, screenY);
+        var (pdfRight, pdfBottom) = ScreenToPdfPoint(screenX + screenW, screenY + screenH);
+
+        var pdfX = Math.Min(pdfLeft, pdfRight);
+        var pdfY = Math.Min(pdfTop, pdfBottom);
+        var pdfW = Math.Abs(pdfRight - pdfLeft);
+        var pdfH = Math.Abs(pdfTop - pdfBottom);
+
+        var props = new FormFieldProperties
+        {
+            OriginalFieldName = _selectedField.FieldName,
+            PageIndex = _selectedField.PageIndex,
+            X = (float)pdfX,
+            Y = (float)pdfY,
+            Width = (float)pdfW,
+            Height = (float)pdfH,
+        };
+
+        _preserveScrollOnRender = true;
+        DeselectFormField();
+        await _viewModel.UpdateFormFieldPropertiesAsync(props);
     }
 
     private async Task ShowFormFieldPropertiesDialog(FormField field)
@@ -1232,6 +1635,7 @@ public sealed partial class PdfViewerPage : UserControl
                 ClearTextBlockOverlays();
                 HideFormatToolbar();
                 _textBlocks = null;
+                _ = ShowFormFieldOverlaysAsync();
             }
 
             InsertionPanel.Width = 260;
@@ -1322,6 +1726,7 @@ public sealed partial class PdfViewerPage : UserControl
         _viewModel.ActiveTool = InsertionTool.None;
         _isInsertionDragging = false;
 
+        DeselectFormField();
         ResetInsertionButtonStyles();
         ShapeOptionsPanel.Visibility = Visibility.Collapsed;
         FormFieldOptionsPanel.Visibility = Visibility.Collapsed;
@@ -1389,6 +1794,180 @@ public sealed partial class PdfViewerPage : UserControl
         || tool == InsertionTool.FormRadioButton || tool == InsertionTool.FormDropdown
         || tool == InsertionTool.FormImage || tool == InsertionTool.FormDate;
 
+    // ---- Grid & Snap helpers ----
+
+    private void OnGridToggle(object sender, RoutedEventArgs e)
+    {
+        _isGridVisible = !_isGridVisible;
+        GridButton.Label = _isGridVisible ? "Grille (ON)" : "Grille";
+        if (_isGridVisible)
+            DrawGrid();
+        else
+            ClearGrid();
+    }
+
+    private void DrawGrid()
+    {
+        ClearGrid();
+        var w = PageCanvas.Width;
+        var h = PageCanvas.Height;
+        if (w <= 0 || h <= 0) return;
+
+        var stroke = new SolidColorBrush(Windows.UI.Color.FromArgb(50, 150, 150, 150));
+
+        for (double x = GridSize; x < w; x += GridSize)
+        {
+            var line = new Line
+            {
+                X1 = x, Y1 = 0, X2 = x, Y2 = h,
+                Stroke = stroke, StrokeThickness = 0.5
+            };
+            Canvas.SetZIndex(line, -1);
+            _gridLines.Add(line);
+            PageCanvas.Children.Add(line);
+        }
+
+        for (double y = GridSize; y < h; y += GridSize)
+        {
+            var line = new Line
+            {
+                X1 = 0, Y1 = y, X2 = w, Y2 = y,
+                Stroke = stroke, StrokeThickness = 0.5
+            };
+            Canvas.SetZIndex(line, -1);
+            _gridLines.Add(line);
+            PageCanvas.Children.Add(line);
+        }
+    }
+
+    private void ClearGrid()
+    {
+        foreach (var line in _gridLines)
+            PageCanvas.Children.Remove(line);
+        _gridLines.Clear();
+    }
+
+    private double SnapToGrid(double value)
+        => _isGridVisible ? Math.Round(value / GridSize) * GridSize : value;
+
+    private (double x, double y) SnapToFields(double x, double y, double w, double h, FrameworkElement? exclude)
+    {
+        ClearSnapGuides();
+
+        // Collect all other overlay rects
+        var rects = new List<(double Left, double Top, double Width, double Height)>();
+        foreach (var el in _formFieldOverlays)
+        {
+            if (el == exclude) continue;
+            rects.Add((Canvas.GetLeft(el), Canvas.GetTop(el), el.Width, el.Height));
+        }
+        foreach (var el in _overlayBorders)
+        {
+            if (el == exclude) continue;
+            rects.Add((Canvas.GetLeft(el), Canvas.GetTop(el), el.Width, el.Height));
+        }
+
+        if (rects.Count == 0) return (x, y);
+
+        double bestDx = double.MaxValue, snapX = x;
+        double bestDy = double.MaxValue, snapY = y;
+
+        // Edges of the moving element
+        double left = x, right = x + w, cx = x + w / 2;
+        double top = y, bottom = y + h, cy = y + h / 2;
+
+        foreach (var r in rects)
+        {
+            double rLeft = r.Left, rRight = r.Left + r.Width, rCx = r.Left + r.Width / 2;
+            double rTop = r.Top, rBottom = r.Top + r.Height, rCy = r.Top + r.Height / 2;
+
+            // Check horizontal alignments (left, right, center)
+            CheckSnap(left, rLeft, 0, ref bestDx, ref snapX, x);
+            CheckSnap(left, rRight, 0, ref bestDx, ref snapX, x);
+            CheckSnap(right, rLeft, -w, ref bestDx, ref snapX, x);
+            CheckSnap(right, rRight, -w, ref bestDx, ref snapX, x);
+            CheckSnap(cx, rCx, -w / 2, ref bestDx, ref snapX, x);
+
+            // Check vertical alignments (top, bottom, center)
+            CheckSnap(top, rTop, 0, ref bestDy, ref snapY, y);
+            CheckSnap(top, rBottom, 0, ref bestDy, ref snapY, y);
+            CheckSnap(bottom, rTop, -h, ref bestDy, ref snapY, y);
+            CheckSnap(bottom, rBottom, -h, ref bestDy, ref snapY, y);
+            CheckSnap(cy, rCy, -h / 2, ref bestDy, ref snapY, y);
+        }
+
+        // Draw snap guides
+        var canvasH = PageCanvas.Height;
+        var canvasW = PageCanvas.Width;
+
+        if (bestDx < SnapThreshold)
+        {
+            // Find the aligned X coordinate for the guide line
+            double guideX = FindAlignedEdge(snapX, snapX + w, snapX + w / 2, rects, horizontal: true);
+            AddSnapGuide(guideX, 0, guideX, canvasH, isVertical: true);
+            x = snapX;
+        }
+
+        if (bestDy < SnapThreshold)
+        {
+            double guideY = FindAlignedEdge(snapY, snapY + h, snapY + h / 2, rects, horizontal: false);
+            AddSnapGuide(0, guideY, canvasW, guideY, isVertical: false);
+            y = snapY;
+        }
+
+        return (x, y);
+    }
+
+    private static double FindAlignedEdge(double start, double end, double center,
+        List<(double Left, double Top, double Width, double Height)> rects, bool horizontal)
+    {
+        foreach (var r in rects)
+        {
+            double rStart = horizontal ? r.Left : r.Top;
+            double rEnd = horizontal ? r.Left + r.Width : r.Top + r.Height;
+            double rCenter = (rStart + rEnd) / 2;
+
+            if (Math.Abs(start - rStart) < 1) return rStart;
+            if (Math.Abs(start - rEnd) < 1) return rEnd;
+            if (Math.Abs(end - rStart) < 1) return rStart;
+            if (Math.Abs(end - rEnd) < 1) return rEnd;
+            if (Math.Abs(center - rCenter) < 1) return rCenter;
+        }
+        return start; // fallback
+    }
+
+    private static void CheckSnap(double edge, double target, double offset, ref double bestDist, ref double snapVal, double original)
+    {
+        var dist = Math.Abs(edge - target);
+        if (dist < SnapThreshold && dist < bestDist)
+        {
+            bestDist = dist;
+            snapVal = target + offset;
+        }
+    }
+
+    private void AddSnapGuide(double x1, double y1, double x2, double y2, bool isVertical)
+    {
+        var guide = new Line
+        {
+            X1 = x1, Y1 = y1, X2 = x2, Y2 = y2,
+            Stroke = new SolidColorBrush(Colors.Magenta),
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 4, 4 },
+            Opacity = 0.8
+        };
+        Canvas.SetZIndex(guide, 1000);
+        _snapGuides.Add(guide);
+        PageCanvas.Children.Add(guide);
+    }
+
+    private void ClearSnapGuides()
+    {
+        foreach (var guide in _snapGuides)
+            PageCanvas.Children.Remove(guide);
+        _snapGuides.Clear();
+    }
+
     private (double pdfX, double pdfY) ScreenToPdfPoint(double screenX, double screenY)
     {
         var imageW = PageImage.Width;
@@ -1403,6 +1982,8 @@ public sealed partial class PdfViewerPage : UserControl
 
     private async void OnCanvasInsertionPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        DeselectFormField();
+
         if (_activeInsertionTool == InsertionTool.None) return;
 
         var pos = e.GetCurrentPoint(PageCanvas).Position;
@@ -1415,14 +1996,7 @@ public sealed partial class PdfViewerPage : UserControl
             return;
         }
 
-        if (_activeInsertionTool == InsertionTool.Image)
-        {
-            e.Handled = true;
-            await InsertImageAtAsync(pos);
-            return;
-        }
-
-        // Shape tools & form field tools: start drag
+        // Shape tools, image & form field tools: start drag
         _isInsertionDragging = true;
         _insertionDragStart = pos;
         PageCanvas.CapturePointer(e.Pointer);
@@ -1453,6 +2027,11 @@ public sealed partial class PdfViewerPage : UserControl
         var y = Math.Min(pos.Y, _insertionDragStart.Y);
         var w = Math.Abs(pos.X - _insertionDragStart.X);
         var h = Math.Abs(pos.Y - _insertionDragStart.Y);
+
+        x = SnapToGrid(x);
+        y = SnapToGrid(y);
+        w = SnapToGrid(w);
+        h = SnapToGrid(h);
 
         Canvas.SetLeft(_insertionPreview, x);
         Canvas.SetTop(_insertionPreview, y);
@@ -1551,6 +2130,31 @@ public sealed partial class PdfViewerPage : UserControl
 
             // Auto-increment field name for next placement
             FormFieldNameBox.Text = GenerateFieldName(_activeInsertionTool);
+        }
+        else if (_activeInsertionTool == InsertionTool.Image)
+        {
+            // Image insertion as form field (PushButton) for resize/drag support
+            var imagePath = await PickImageFileAsync();
+            if (imagePath == null)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            _fieldCounter++;
+            var formParams = new CreateFormFieldParams
+            {
+                PageIndex = _viewModel.CurrentPageIndex,
+                FieldTool = InsertionTool.FormImage,
+                FieldName = $"img_{_fieldCounter}",
+                X = (float)pdfX,
+                Y = (float)pdfY,
+                Width = (float)pdfW,
+                Height = (float)pdfH,
+                ImageFilePath = imagePath,
+            };
+
+            await _viewModel.CreateFormFieldAsync(formParams);
         }
         else
         {
@@ -1677,66 +2281,6 @@ public sealed partial class PdfViewerPage : UserControl
         await _viewModel.InsertTextAsync(parameters);
     }
 
-    private async Task InsertImageAtAsync(Point screenPos)
-    {
-        var picker = new FileOpenPicker();
-        picker.FileTypeFilter.Add(".png");
-        picker.FileTypeFilter.Add(".jpg");
-        picker.FileTypeFilter.Add(".jpeg");
-        picker.FileTypeFilter.Add(".bmp");
-        picker.FileTypeFilter.Add(".gif");
-        picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
-
-        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-
-        var file = await picker.PickSingleFileAsync();
-        if (file == null) return;
-
-        // Get image dimensions to maintain aspect ratio
-        float imgWidth = 200f;
-        float imgHeight = 200f;
-
-        try
-        {
-            using var stream = await file.OpenReadAsync();
-            var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(stream);
-            var pixelWidth = (float)decoder.PixelWidth;
-            var pixelHeight = (float)decoder.PixelHeight;
-
-            // Scale to reasonable PDF size (max 300pt on largest side)
-            var maxDim = 300f;
-            if (pixelWidth > pixelHeight)
-            {
-                imgWidth = maxDim;
-                imgHeight = maxDim * pixelHeight / pixelWidth;
-            }
-            else
-            {
-                imgHeight = maxDim;
-                imgWidth = maxDim * pixelWidth / pixelHeight;
-            }
-        }
-        catch
-        {
-            // Fallback to square
-        }
-
-        var (pdfX, pdfY) = ScreenToPdfPoint(screenPos.X, screenPos.Y);
-
-        var parameters = new InsertImageParams
-        {
-            PageIndex = _viewModel.CurrentPageIndex,
-            X = (float)pdfX,
-            Y = (float)(pdfY - imgHeight), // PDF Y is bottom-left, place image below click point
-            Width = imgWidth,
-            Height = imgHeight,
-            ImageFilePath = file.Path,
-        };
-
-        _preserveScrollOnRender = true;
-        await _viewModel.InsertImageAsync(parameters);
-    }
 
     // ---- Form field modals ----
 
@@ -1785,6 +2329,27 @@ public sealed partial class PdfViewerPage : UserControl
 
     // ---- File operations ----
 
+    private async void OnNewClick(object sender, RoutedEventArgs e)
+    {
+        _isEditMode = false;
+        EditModeButton.Label = "Éditer";
+        ClearTextBlockOverlays();
+        ClearFormFieldOverlays();
+        ClearGrid();
+        HideFormatToolbar();
+        _textBlocks = null;
+
+        if (_isInsertionPanelOpen)
+        {
+            _isInsertionPanelOpen = false;
+            InsertionPanel.Width = 0;
+            InsertButton.Label = "Insérer";
+            CancelInsertionMode();
+        }
+
+        await _viewModel.CreateDocumentAsync();
+    }
+
     private async void OnOpenClick(object sender, RoutedEventArgs e)
     {
         var picker = new FileOpenPicker();
@@ -1801,6 +2366,7 @@ public sealed partial class PdfViewerPage : UserControl
             EditModeButton.Label = "Éditer";
             ClearTextBlockOverlays();
             ClearFormFieldOverlays();
+            ClearGrid();
             HideFormatToolbar();
             _textBlocks = null;
 
@@ -1818,8 +2384,25 @@ public sealed partial class PdfViewerPage : UserControl
 
     private async void OnSaveClick(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.SaveCommand.CanExecute(null))
+        if (_viewModel.Document?.IsNew == true)
+        {
+            // New document: prompt for save location
+            var picker = new Windows.Storage.Pickers.FileSavePicker();
+            picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+            picker.FileTypeChoices.Add("PDF", new List<string> { ".pdf" });
+            picker.SuggestedFileName = "Nouveau document";
+
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSaveFileAsync();
+            if (file != null)
+                await _viewModel.SaveAsAsync(file.Path);
+        }
+        else if (_viewModel.SaveCommand.CanExecute(null))
+        {
             await _viewModel.SaveCommand.ExecuteAsync(null);
+        }
     }
 
     private async void OnUndoClick(object sender, RoutedEventArgs e)
@@ -2040,6 +2623,7 @@ public class FieldListItem
         FormFieldType.Checkbox => "Case à cocher",
         FormFieldType.RadioButton => "Bouton radio",
         FormFieldType.Dropdown => "Liste déroulante",
+        FormFieldType.PushButton => "Image",
         FormFieldType.Signature => "Signature",
         _ => "Inconnu"
     };
@@ -2050,6 +2634,7 @@ public class FieldListItem
         FormFieldType.Checkbox => "\uE73A",
         FormFieldType.RadioButton => "\uECCB",
         FormFieldType.Dropdown => "\uE70D",
+        FormFieldType.PushButton => "\uE91B",
         FormFieldType.Signature => "\uE8A3",
         _ => "\uE946"
     };
