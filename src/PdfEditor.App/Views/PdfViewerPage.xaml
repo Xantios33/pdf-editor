@@ -59,6 +59,10 @@
                           Click="OnPrevPageClick" IsEnabled="False" />
             <AppBarButton x:Name="NextButton" Icon="Next" Label="Suivant"
                           Click="OnNextPageClick" IsEnabled="False" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="ManagePagesButton" Label="Pages" Click="OnManagePagesClick" IsEnabled="False">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE7C3;" /></AppBarButton.Icon>
+            </AppBarButton>
         </CommandBar>
 
         <!-- Format Toolbar (visible when editing a text block) -->

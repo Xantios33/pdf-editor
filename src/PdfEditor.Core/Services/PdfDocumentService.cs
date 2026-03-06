@@ -76,4 +76,82 @@ public class PdfDocumentService : IPdfDocumentService
             catch { /* Best effort cleanup */ }
         }
     }
+
+    public int GetPageCount(string filePath)
+    {
+        using var reader = new PdfReader(filePath);
+        using var pdfDoc = new PdfDocument(reader);
+        return pdfDoc.GetNumberOfPages();
+    }
+
+    public void AddBlankPage(string filePath, int insertAtIndex)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        using var readStream = new MemoryStream(bytes);
+        using var reader = new PdfReader(readStream);
+        using var writer = new PdfWriter(filePath);
+        using var pdfDoc = new PdfDocument(reader, writer);
+
+        var pageSize = insertAtIndex >= 0 && insertAtIndex < pdfDoc.GetNumberOfPages()
+            ? pdfDoc.GetPage(insertAtIndex + 1).GetPageSize()
+            : PageSize.A4;
+
+        pdfDoc.AddNewPage(insertAtIndex + 2, new PageSize(pageSize));
+        pdfDoc.Close();
+    }
+
+    public int InsertPagesFrom(string filePath, string sourcePdfPath, int insertAtIndex)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        using var readStream = new MemoryStream(bytes);
+        using var reader = new PdfReader(readStream);
+        using var writer = new PdfWriter(filePath);
+        using var targetDoc = new PdfDocument(reader, writer);
+
+        using var sourceReader = new PdfReader(sourcePdfPath);
+        using var sourceDoc = new PdfDocument(sourceReader);
+
+        int sourcePageCount = sourceDoc.GetNumberOfPages();
+        sourceDoc.CopyPagesTo(1, sourcePageCount, targetDoc, insertAtIndex + 2);
+
+        targetDoc.Close();
+        sourceDoc.Close();
+
+        return sourcePageCount;
+    }
+
+    public void DeletePage(string filePath, int pageIndex)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        using var readStream = new MemoryStream(bytes);
+        using var reader = new PdfReader(readStream);
+        using var writer = new PdfWriter(filePath);
+        using var pdfDoc = new PdfDocument(reader, writer);
+
+        pdfDoc.RemovePage(pageIndex + 1);
+        pdfDoc.Close();
+    }
+
+    public void ReorderPages(string filePath, int[] newOrder)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        var tempPath = Path.Combine(Path.GetTempPath(), $"pdfedit_reorder_{Guid.NewGuid():N}.pdf");
+
+        using (var sourceStream = new MemoryStream(bytes))
+        using (var sourceReader = new PdfReader(sourceStream))
+        using (var sourceDoc = new PdfDocument(sourceReader))
+        using (var targetWriter = new PdfWriter(tempPath))
+        using (var targetDoc = new PdfDocument(targetWriter))
+        {
+            foreach (int oldIndex in newOrder)
+            {
+                sourceDoc.CopyPagesTo(oldIndex + 1, oldIndex + 1, targetDoc);
+            }
+            targetDoc.Close();
+            sourceDoc.Close();
+        }
+
+        File.Copy(tempPath, filePath, overwrite: true);
+        try { File.Delete(tempPath); } catch { }
+    }
 }

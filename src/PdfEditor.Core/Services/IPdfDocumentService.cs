@@ -9,4 +9,9 @@ public interface IPdfDocumentService
     void Save(PdfDocumentModel document);
     void SaveAs(PdfDocumentModel document, string newPath);
     void Close(PdfDocumentModel document);
+    int GetPageCount(string filePath);
+    void AddBlankPage(string filePath, int insertAtIndex);
+    int InsertPagesFrom(string filePath, string sourcePdfPath, int insertAtIndex);
+    void DeletePage(string filePath, int pageIndex);
+    void ReorderPages(string filePath, int[] newOrder);
 }

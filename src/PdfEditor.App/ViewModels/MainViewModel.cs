@@ -291,6 +291,11 @@ public partial class MainViewModel : ObservableObject
             await Task.Run(() => _undoRedo.Undo(_document.ActivePath));
             UpdateUndoRedoState();
 
+            var newCount = await Task.Run(() => _documentService.GetPageCount(_document.ActivePath));
+            PageCount = newCount;
+            if (CurrentPageIndex >= PageCount)
+                CurrentPageIndex = PageCount - 1;
+
             ClearCache();
             await RenderCurrentPageAsync();
 
@@ -317,6 +322,11 @@ public partial class MainViewModel : ObservableObject
 
             await Task.Run(() => _undoRedo.Redo(_document.ActivePath));
             UpdateUndoRedoState();
+
+            var newCount = await Task.Run(() => _documentService.GetPageCount(_document.ActivePath));
+            PageCount = newCount;
+            if (CurrentPageIndex >= PageCount)
+                CurrentPageIndex = PageCount - 1;
 
             ClearCache();
             await RenderCurrentPageAsync();
@@ -464,6 +474,140 @@ public partial class MainViewModel : ObservableObject
         {
             IsLoading = false;
         }
+    }
+
+    public async Task AddBlankPageAsync(int insertAfterIndex)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Ajout page blanche...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _documentService.AddBlankPage(_document.ActivePath, insertAfterIndex));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            PageCount++;
+            ClearCache();
+            CurrentPageIndex = insertAfterIndex + 1;
+            await RenderCurrentPageAsync();
+
+            StatusText = "Page blanche ajoutée";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task InsertPagesFromAsync(string sourcePath, int insertAfterIndex)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Insertion pages...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            int insertedCount = await Task.Run(() =>
+                _documentService.InsertPagesFrom(_document.ActivePath, sourcePath, insertAfterIndex));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            PageCount += insertedCount;
+            ClearCache();
+            CurrentPageIndex = insertAfterIndex + 1;
+            await RenderCurrentPageAsync();
+
+            StatusText = $"{insertedCount} page(s) insérée(s)";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task DeletePageAsync(int pageIndex)
+    {
+        if (_document == null || PageCount <= 1) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Suppression page...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _documentService.DeletePage(_document.ActivePath, pageIndex));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            PageCount--;
+            ClearCache();
+            if (CurrentPageIndex >= PageCount)
+                CurrentPageIndex = PageCount - 1;
+            await RenderCurrentPageAsync();
+
+            StatusText = "Page supprimée";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task ReorderPagesAsync(int[] newOrder)
+    {
+        if (_document == null) return;
+
+        try
+        {
+            IsLoading = true;
+            StatusText = "Réorganisation...";
+
+            _undoRedo.SaveSnapshot(_document.ActivePath);
+
+            await Task.Run(() => _documentService.ReorderPages(_document.ActivePath, newOrder));
+            _document.HasUnsavedChanges = true;
+            UpdateUndoRedoState();
+
+            ClearCache();
+            await RenderCurrentPageAsync();
+
+            StatusText = "Pages réorganisées";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Erreur: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    public async Task<SKBitmap?> RenderThumbnailAsync(int pageIndex)
+    {
+        if (_document == null) return null;
+        return await _renderService.RenderPageAsync(_document.ActivePath, pageIndex, dpi: 72);
     }
 
     public async Task InsertTextAsync(InsertTextParams parameters)

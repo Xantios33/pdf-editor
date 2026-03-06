@@ -72,6 +72,11 @@ public sealed partial class PdfViewerPage : UserControl
     private readonly List<Line> _gridLines = new();
     private readonly List<Line> _snapGuides = new();
 
+    // Middle-button pan state
+    private bool _isMiddleButtonPanning;
+    private Point _panStart;
+    private double _panOrigHOffset, _panOrigVOffset;
+
     // Format toolbar state — suppress change events during sync
     private bool _syncingToolbar;
 
@@ -100,6 +105,12 @@ public sealed partial class PdfViewerPage : UserControl
             PointerWheelChangedEvent,
             new PointerEventHandler(OnPointerWheelChanged),
             handledEventsToo: true);
+
+        // Middle-button pan
+        PageScrollViewer.PointerPressed += OnScrollViewerPointerPressed;
+        PageScrollViewer.PointerMoved += OnScrollViewerPointerMoved;
+        PageScrollViewer.PointerReleased += OnScrollViewerPointerReleased;
+        PageScrollViewer.PointerCanceled += OnScrollViewerPointerReleased;
 
         InitializeColorGrid();
 
@@ -204,6 +215,7 @@ public sealed partial class PdfViewerPage : UserControl
                 SaveButton.IsEnabled = _viewModel.HasDocument;
                 EditModeButton.IsEnabled = _viewModel.HasDocument;
                 InsertButton.IsEnabled = _viewModel.HasDocument;
+                ManagePagesButton.IsEnabled = _viewModel.HasDocument;
                 UpdateNavigationButtons();
                 break;
 
@@ -2429,6 +2441,189 @@ public sealed partial class PdfViewerPage : UserControl
             await ShowTextBlockOverlaysAsync();
     }
 
+    // ---- Page management modal ----
+
+    private class PageThumbnailItem
+    {
+        public int OriginalIndex { get; set; }
+        public string Label { get; set; } = "";
+        public Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? Thumbnail { get; set; }
+    }
+
+    private async void OnManagePagesClick(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.Document == null) return;
+
+        var items = new System.Collections.ObjectModel.ObservableCollection<PageThumbnailItem>();
+        var gridView = new GridView
+        {
+            CanReorderItems = true,
+            AllowDrop = true,
+            CanDragItems = true,
+            SelectionMode = ListViewSelectionMode.Single,
+            ItemsSource = items,
+            MinWidth = 600,
+            MinHeight = 400,
+            MaxHeight = 500,
+            Padding = new Thickness(0, 0, 16, 0),
+        };
+
+        gridView.ItemTemplate = CreateThumbnailTemplate();
+
+        var addBlankBtn = new Button { Content = "Ajouter page blanche", Margin = new Thickness(0, 0, 8, 0) };
+        var deleteBtn = new Button { Content = "Supprimer la sélection", Margin = new Thickness(0, 0, 8, 0) };
+        var addPdfBtn = new Button { Content = "Ajouter PDF" };
+
+        var toolbar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 12),
+            Children = { addBlankBtn, deleteBtn, addPdfBtn }
+        };
+
+        var loadingRing = new ProgressRing { IsActive = true, Width = 32, Height = 32, Margin = new Thickness(0, 12, 0, 0) };
+
+        var contentPanel = new StackPanel
+        {
+            Children = { toolbar, gridView, loadingRing }
+        };
+
+        var dialog = new ContentDialog
+        {
+            Title = "Gestion des pages",
+            Content = contentPanel,
+            PrimaryButtonText = "Appliquer",
+            CloseButtonText = "Annuler",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = this.XamlRoot,
+        };
+
+        // Load thumbnails
+        await LoadThumbnailsAsync(items, loadingRing);
+
+        // Button handlers
+        addBlankBtn.Click += async (s, args) =>
+        {
+            int insertAfter = gridView.SelectedIndex >= 0 ? gridView.SelectedIndex : items.Count - 1;
+            await _viewModel.AddBlankPageAsync(GetOriginalIndex(items, insertAfter));
+            await LoadThumbnailsAsync(items, loadingRing);
+        };
+
+        deleteBtn.Click += async (s, args) =>
+        {
+            if (gridView.SelectedIndex < 0 || items.Count <= 1) return;
+            int selectedIdx = gridView.SelectedIndex;
+            await _viewModel.DeletePageAsync(GetOriginalIndex(items, selectedIdx));
+            await LoadThumbnailsAsync(items, loadingRing);
+        };
+
+        addPdfBtn.Click += async (s, args) =>
+        {
+            var picker = new FileOpenPicker();
+            picker.FileTypeFilter.Add(".pdf");
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            var file = await picker.PickSingleFileAsync();
+            if (file != null)
+            {
+                int insertAfter = gridView.SelectedIndex >= 0 ? gridView.SelectedIndex : items.Count - 1;
+                await _viewModel.InsertPagesFromAsync(file.Path, GetOriginalIndex(items, insertAfter));
+                await LoadThumbnailsAsync(items, loadingRing);
+            }
+        };
+
+        var result = await dialog.ShowAsync();
+
+        if (result == ContentDialogResult.Primary)
+        {
+            // Check if order changed via drag-and-drop
+            var newOrder = items.Select(i => i.OriginalIndex).ToArray();
+            bool orderChanged = false;
+            for (int i = 0; i < newOrder.Length; i++)
+            {
+                if (newOrder[i] != i)
+                {
+                    orderChanged = true;
+                    break;
+                }
+            }
+
+            if (orderChanged)
+            {
+                await _viewModel.ReorderPagesAsync(newOrder);
+            }
+        }
+    }
+
+    private static int GetOriginalIndex(System.Collections.ObjectModel.ObservableCollection<PageThumbnailItem> items, int displayIndex)
+    {
+        // After add/delete operations, items are reloaded fresh so OriginalIndex == displayIndex
+        return displayIndex;
+    }
+
+    private async Task LoadThumbnailsAsync(
+        System.Collections.ObjectModel.ObservableCollection<PageThumbnailItem> items,
+        ProgressRing loadingRing)
+    {
+        loadingRing.IsActive = true;
+        loadingRing.Visibility = Visibility.Visible;
+        items.Clear();
+
+        int pageCount = _viewModel.PageCount;
+        var thumbnails = new SkiaSharp.SKBitmap?[pageCount];
+
+        // Render thumbnails in parallel
+        var tasks = new Task[pageCount];
+        for (int i = 0; i < pageCount; i++)
+        {
+            int idx = i;
+            tasks[i] = Task.Run(async () =>
+            {
+                thumbnails[idx] = await _viewModel.RenderThumbnailAsync(idx);
+            });
+        }
+        await Task.WhenAll(tasks);
+
+        // Convert to WriteableBitmaps on UI thread and populate
+        for (int i = 0; i < pageCount; i++)
+        {
+            Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? wb = null;
+            if (thumbnails[i] != null)
+            {
+                wb = Helpers.BitmapHelper.ToWriteableBitmap(thumbnails[i]!);
+                thumbnails[i]!.Dispose();
+            }
+
+            items.Add(new PageThumbnailItem
+            {
+                OriginalIndex = i,
+                Label = $"Page {i + 1}",
+                Thumbnail = wb,
+            });
+        }
+
+        loadingRing.IsActive = false;
+        loadingRing.Visibility = Visibility.Collapsed;
+    }
+
+    private DataTemplate CreateThumbnailTemplate()
+    {
+        // Build DataTemplate in code since we can't use XAML resources from code-behind easily
+        var xaml = @"
+<DataTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"">
+    <StackPanel Width=""130"" Margin=""4"" HorizontalAlignment=""Center"">
+        <Border BorderBrush=""{ThemeResource CardStrokeColorDefaultBrush}""
+                BorderThickness=""1"" Background=""White""
+                Width=""120"" Height=""160"">
+            <Image Source=""{Binding Thumbnail}"" Stretch=""Uniform"" />
+        </Border>
+        <TextBlock Text=""{Binding Label}"" HorizontalAlignment=""Center""
+                   Margin=""0,4,0,0"" FontSize=""12"" />
+    </StackPanel>
+</DataTemplate>";
+        return (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(xaml);
+    }
+
     // ---- Navigation ----
 
     private async void OnPrevPageClick(object sender, RoutedEventArgs e)
@@ -2467,6 +2662,50 @@ public sealed partial class PdfViewerPage : UserControl
         _zoomPercent = Math.Clamp(newZoomPercent, 10, 500);
         if (_bitmapWidth > 0)
             ApplyImageSize();
+    }
+
+    // ---- Middle-button pan ----
+
+    private void OnScrollViewerPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var props = e.GetCurrentPoint(PageScrollViewer).Properties;
+        if (!props.IsMiddleButtonPressed) return;
+
+        _isMiddleButtonPanning = true;
+        _panStart = e.GetCurrentPoint(PageScrollViewer).Position;
+        _panOrigHOffset = PageScrollViewer.HorizontalOffset;
+        _panOrigVOffset = PageScrollViewer.VerticalOffset;
+        PageScrollViewer.CapturePointer(e.Pointer);
+        ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.Hand);
+        e.Handled = true;
+    }
+
+    private void OnScrollViewerPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isMiddleButtonPanning) return;
+
+        var pos = e.GetCurrentPoint(PageScrollViewer).Position;
+        var dx = pos.X - _panStart.X;
+        var dy = pos.Y - _panStart.Y;
+
+        PageScrollViewer.ChangeView(
+            _panOrigHOffset - dx,
+            _panOrigVOffset - dy,
+            null, disableAnimation: true);
+
+        e.Handled = true;
+    }
+
+    private void OnScrollViewerPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isMiddleButtonPanning) return;
+
+        _isMiddleButtonPanning = false;
+        try { PageScrollViewer.ReleasePointerCapture(e.Pointer); } catch { }
+        ProtectedCursor = _activeInsertionTool != InsertionTool.None
+            ? InputSystemCursor.Create(InputSystemCursorShape.Cross)
+            : null;
+        e.Handled = true;
     }
 
     // ---- Field list tab ----
